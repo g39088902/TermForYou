@@ -57,25 +57,25 @@ function formatSpeed(kbPerSec: number): string {
 </script>
 
 <template>
-  <div class="bg-slate-900/90 border-b border-slate-800 px-3 py-1.5 flex items-center justify-between text-xs shrink-0 select-none">
+  <div class="bg-slate-900/90 border-b border-slate-800 px-3 py-1.5 flex items-center justify-between text-xs shrink-0 select-none overflow-x-auto">
     <!-- 左侧：实时微缩性能指标条 (Mini HUD)，支持一键跳转对应模块 -->
-    <div class="flex items-center gap-2 flex-wrap">
+    <div class="flex items-center gap-2 flex-nowrap shrink-0">
       <!-- 主机网络标识 -->
       <span
-        class="text-[11px] font-mono text-slate-400 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800"
+        class="text-[11px] font-mono text-slate-400 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 shrink-0 whitespace-nowrap"
         :title="`系统内核: ${currentHost.kernel} | 运行时间: ${currentHost.uptime}`"
       >
         {{ currentHost.user }}@{{ currentHost.ip }}:{{ currentHost.port }}
       </span>
 
-      <!-- 操作系统版本 -->
+      <!-- 操作系统版本 (完整名称展示，不省略) -->
       <span
-        class="flex items-center gap-1.5 text-[11px] font-mono px-2 py-0.5 rounded bg-slate-950/90 border border-slate-800/90 text-slate-300"
+        class="flex items-center gap-1.5 text-[11px] font-mono px-2 py-0.5 rounded bg-slate-950/90 border border-slate-800/90 text-slate-300 shrink-0 whitespace-nowrap"
         :title="`操作系统完整版本: ${currentHost.os}\n系统内核: ${currentHost.kernel}`"
       >
         <Layers class="w-3 h-3 text-cyan-400 shrink-0" />
         <span class="text-slate-400 text-[10px]">OS</span>
-        <span class="text-slate-200 font-medium truncate max-w-[240px]">{{ currentHost.os }}</span>
+        <span class="text-slate-200 font-medium whitespace-nowrap">{{ currentHost.os }}</span>
       </span>
 
       <!-- 实时 CPU / 内存 / 负载指标块 (点击直达性能与进程中心) -->
@@ -88,7 +88,7 @@ function formatSpeed(kbPerSec: number): string {
             reason: '从顶部 Mini HUD 查看 CPU 与内存实时归因'
           })
         "
-        class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer"
+        class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer shrink-0 whitespace-nowrap"
         :title="`点击查看性能与进程详情 (Load: ${currentHost.loadAvg.join(', ')})`"
       >
         <Cpu class="w-3.5 h-3.5 text-cyan-400 shrink-0" />
@@ -115,7 +115,7 @@ function formatSpeed(kbPerSec: number): string {
             openPath: currentHost.currentCwd
           })
         "
-        class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer"
+        class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer shrink-0 whitespace-nowrap"
         :title="currentHost.diskUsedGb && currentHost.diskTotalGb ? `根分区已用 ${currentHost.diskUsedGb}GB / 共 ${currentHost.diskTotalGb}GB` : '点击进入文件管理'"
       >
         <HardDrive class="w-3.5 h-3.5 text-indigo-400 shrink-0" />
@@ -125,7 +125,7 @@ function formatSpeed(kbPerSec: number): string {
 
       <!-- 实时上下行网速 -->
       <div
-        class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 border border-slate-800/90 font-mono text-[11px]"
+        class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 border border-slate-800/90 font-mono text-[11px] shrink-0 whitespace-nowrap"
         title="网络实时吞吐量 (基于 /proc/net/dev 差值计算)"
       >
         <ArrowUpDown class="w-3.5 h-3.5 text-slate-500 shrink-0" />
@@ -137,7 +137,7 @@ function formatSpeed(kbPerSec: number): string {
       <button
         type="button"
         @click="handleManualRefresh"
-        class="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/90 hover:bg-slate-800/90 border border-slate-800/90 transition cursor-pointer text-slate-400 hover:text-slate-200"
+        class="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/90 hover:bg-slate-800/90 border border-slate-800/90 transition cursor-pointer text-slate-400 hover:text-slate-200 shrink-0 whitespace-nowrap"
         title="免 Agent 纳秒级采集：默认每 3 秒自动轮询更新，点击立即手动采样"
       >
         <RefreshCw
@@ -170,7 +170,7 @@ function formatSpeed(kbPerSec: number): string {
           })
         "
         :class="[
-          'flex items-center gap-1.5 px-2.5 py-1 rounded border transition cursor-pointer',
+          'flex items-center gap-1.5 px-2.5 py-1 rounded border transition cursor-pointer shrink-0 whitespace-nowrap',
           currentHost.firewallEnabled
             ? 'bg-emerald-950/40 border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/40'
             : 'bg-rose-950/50 border-rose-700/50 text-rose-300 hover:bg-rose-900/40'
@@ -192,7 +192,7 @@ function formatSpeed(kbPerSec: number): string {
             openPath: currentHost.currentCwd
           })
         "
-        class="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-mono text-[11px] cursor-pointer"
+        class="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 font-mono text-[11px] cursor-pointer shrink-0 whitespace-nowrap"
         title="点击在文件管理全屏页打开该路径"
       >
         <FolderSync class="w-3.5 h-3.5 text-amber-400" />
@@ -201,10 +201,10 @@ function formatSpeed(kbPerSec: number): string {
     </div>
 
     <!-- 右侧：跨模块跳转轨迹胶囊 + 随行终端抽屉开关 -->
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2 shrink-0 ml-3 whitespace-nowrap">
       <div
         v-if="store.lastJumpContext"
-        class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/40 text-cyan-300 text-[11px]"
+        class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/40 text-cyan-300 text-[11px] shrink-0 whitespace-nowrap"
       >
         <Sparkles class="w-3 h-3" />
         <span>联动上下文：{{ store.lastJumpContext.reason }}</span>
@@ -223,7 +223,7 @@ function formatSpeed(kbPerSec: number): string {
         type="button"
         @click="store.bottomTerminalOpen = !store.bottomTerminalOpen"
         :class="[
-          'flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-medium transition cursor-pointer',
+          'flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-medium transition cursor-pointer shrink-0 whitespace-nowrap',
           store.bottomTerminalOpen
             ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50'
             : 'bg-slate-950 text-slate-300 border-slate-800 hover:bg-slate-800'
