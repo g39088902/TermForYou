@@ -22,10 +22,12 @@
   --color-cyan-400: var(--tint-cyan-400);
   --color-cyan-950: var(--tint-cyan-950);
 
+  --color-emerald-200: var(--tint-emerald-200);
   --color-emerald-300: var(--tint-emerald-300);
   --color-emerald-400: var(--tint-emerald-400);
   --color-emerald-950: var(--tint-emerald-950);
 
+  --color-amber-200: var(--tint-amber-200);
   --color-amber-300: var(--tint-amber-300);
   --color-amber-400: var(--tint-amber-400);
   --color-amber-950: var(--tint-amber-950);
@@ -75,10 +77,12 @@
   --tint-cyan-400: #0284c7;
   --tint-cyan-950: #e0f2fe;
 
+  --tint-emerald-200: #065f46;
   --tint-emerald-300: #047857;
   --tint-emerald-400: #059669;
   --tint-emerald-950: #d1fae5;
 
+  --tint-amber-200: #92400e;
   --tint-amber-300: #b45309;
   --tint-amber-400: #d97706;
   --tint-amber-950: #fef3c7;
@@ -122,10 +126,12 @@
     --tint-cyan-400: #22d3ee;
     --tint-cyan-950: #083344;
 
+    --tint-emerald-200: #a7f3d0;
     --tint-emerald-300: #6ee7b7;
     --tint-emerald-400: #34d399;
     --tint-emerald-950: #022c22;
 
+    --tint-amber-200: #fde68a;
     --tint-amber-300: #fcd34d;
     --tint-amber-400: #fbbf24;
     --tint-amber-950: #451a03;
@@ -178,10 +184,12 @@
     --tint-cyan-400: light-dark(#0284c7, #22d3ee);
     --tint-cyan-950: light-dark(#e0f2fe, #083344);
 
+    --tint-emerald-200: light-dark(#065f46, #a7f3d0);
     --tint-emerald-300: light-dark(#047857, #6ee7b7);
     --tint-emerald-400: light-dark(#059669, #34d399);
     --tint-emerald-950: light-dark(#d1fae5, #022c22);
 
+    --tint-amber-200: light-dark(#92400e, #fde68a);
     --tint-amber-300: light-dark(#b45309, #fcd34d);
     --tint-amber-400: light-dark(#d97706, #fbbf24);
     --tint-amber-950: light-dark(#fef3c7, #451a03);

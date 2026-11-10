@@ -152,24 +152,24 @@ onMounted(() => {
         <button
           type="button"
           @click="toggleAutoProbe()"
-          class="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer select-none"
+          class="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold transition cursor-pointer select-none"
           :class="
             store.autoProbeEnabled
-              ? 'bg-emerald-950/70 border-emerald-500/70 text-emerald-200 hover:bg-emerald-900/60 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
+              ? 'bg-emerald-950/80 border-emerald-500/70 text-emerald-200 hover:bg-emerald-950 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
               : 'bg-slate-950 border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600'
           "
           :title="store.autoProbeEnabled ? '自动探测已开启：每 30 秒静默全量探测开机状态与全页面系统指标' : '自动探测已停用：点击开启每 30 秒自动探测'"
         >
           <span
             class="w-2 h-2 rounded-full"
-            :class="store.autoProbeEnabled ? 'bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]' : 'bg-slate-600'"
+            :class="store.autoProbeEnabled ? 'bg-emerald-500 dark:bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]' : 'bg-slate-600'"
           />
           <span>自动探测 (30s)</span>
           <span
             class="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold tracking-wider inline-flex items-center justify-center leading-none"
             :class="
               store.autoProbeEnabled
-                ? 'bg-emerald-400 text-slate-950 shadow-sm ring-1 ring-emerald-300'
+                ? 'bg-emerald-500 text-white dark:bg-emerald-400 dark:text-slate-950 shadow-sm ring-1 ring-emerald-300'
                 : 'bg-slate-800 text-slate-300 border border-slate-700'
             "
           >
@@ -286,12 +286,12 @@ onMounted(() => {
                 <!-- 密码不对未接通醒目标识 -->
                 <span
                   v-if="host.authFailed"
-                  class="px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1 font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40 shadow-sm"
+                  class="px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1 font-semibold bg-amber-500/15 text-amber-200 border border-amber-500/40 shadow-sm"
                   :title="`主机已开机 · 但因密码不对或未完成认证未接通 (${host.authMessage || 'Permission denied'})`"
                 >
-                  <KeyRound class="w-3 h-3 text-amber-400" />
+                  <KeyRound class="w-3 h-3 text-amber-500 dark:text-amber-400 shrink-0" />
                   <span>密码不对 · 未接通</span>
-                  <span v-if="host.pingMs !== undefined" class="font-mono text-[9px] text-amber-400/90">{{ host.pingMs }}ms</span>
+                  <span v-if="host.pingMs !== undefined" class="font-mono text-[9px] text-amber-200/90">{{ host.pingMs }}ms</span>
                 </span>
 
                 <!-- 开机连通正常醒目标签 -->
@@ -413,16 +413,16 @@ onMounted(() => {
           <!-- 密码不对未接通时的醒目警告横幅与快捷输入密码入口 -->
           <div
             v-if="host.authFailed"
-            class="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-amber-950/60 border border-amber-500/40 text-amber-200 text-xs shadow-sm"
+            class="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-amber-950/70 border border-amber-500/40 text-amber-200 text-xs shadow-sm"
           >
             <div class="flex items-center gap-1.5 truncate">
-              <KeyRound class="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span class="truncate font-medium text-[11px]">{{ host.authMessage || '密码错误或身份认证被拒绝，未接通系统' }}</span>
+              <KeyRound class="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0" />
+              <span class="truncate font-semibold text-[11px]">{{ host.authMessage || '密码错误或身份认证被拒绝，未接通系统' }}</span>
             </div>
             <button
               type="button"
               @click.stop="openPasswordModal(host)"
-              class="shrink-0 px-2 py-0.5 text-[10px] rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold transition cursor-pointer"
+              class="shrink-0 px-2 py-0.5 text-[10px] rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 font-bold transition cursor-pointer"
             >
               输入密码
             </button>
