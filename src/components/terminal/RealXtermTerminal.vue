@@ -75,6 +75,43 @@ function getTerminalTheme(scheme: 'light' | 'dark'): ITheme {
   return scheme === 'dark' ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME
 }
 
+/**
+ * 净化远端 ANSI 字符流中硬编码的暗色背景代码（如 \e[40m 黑色背景、\e[100m 亮黑背景及 \e[48;5;0m 256色黑底），
+ * 将其平滑重映射为终端默认背景色代码（\e[49m），以确保终端始终强制保留与网页主题完全一致的底色，
+ * 消除远端 bash PS1 等脚本造成的突兀色块。
+ */
+let pendingAnsiChunk = ''
+
+function sanitizeAnsiStreamForTheme(text: string): string {
+  const combined = pendingAnsiChunk + text
+  // 检查数据末尾是否包含因网络分包截断的未闭合 ANSI 转义头（如 \x1b 或 \x1b[37;4）
+  const unclosedMatch = combined.match(/\x1b\[?[0-9;]*$/)
+  let toProcess = combined
+  if (unclosedMatch) {
+    toProcess = combined.slice(0, unclosedMatch.index)
+    pendingAnsiChunk = unclosedMatch[0]
+  } else {
+    pendingAnsiChunk = ''
+  }
+
+  return toProcess.replace(/\x1b\[([0-9;]*)m/g, (match, paramStr) => {
+    if (!paramStr) return match
+    const parts = paramStr.split(';')
+    let changed = false
+    for (let i = 0; i < parts.length; i++) {
+      const code = parts[i]
+      if (code === '40' || code === '100') {
+        parts[i] = '49' // 强制重置为终端默认底色
+        changed = true
+      } else if (code === '48' && parts[i + 1] === '5' && parts[i + 2] === '0') {
+        parts.splice(i, 3, '49')
+        changed = true
+      }
+    }
+    return changed ? `\x1b[${parts.join(';')}m` : match
+  })
+}
+
 function connectTerminal(password?: string) {
   if (!props.hostAlias) return
   if (ws) {
@@ -85,6 +122,7 @@ function connectTerminal(password?: string) {
   isConnecting.value = true
   needPassword.value = false
   authErrorMsg.value = ''
+  pendingAnsiChunk = ''
 
   if (term) {
     term.reset()
@@ -118,14 +156,20 @@ function connectTerminal(password?: string) {
     try {
       const msg = JSON.parse(event.data)
       if (msg.action === 'stdout' || msg.action === 'stderr') {
-        term?.write(msg.payload)
+        const payload = sanitizeAnsiStreamForTheme(msg.payload)
+        if (payload) {
+          term?.write(payload)
+        }
       } else if (msg.action === 'auth_required') {
         needPassword.value = true
         authErrorMsg.value = msg.payload || '需要输入 SSH 密码以继续连接'
         term?.writeln(`\r\n\x1b[33m${authErrorMsg.value}\x1b[0m\r\n`)
       }
     } catch {
-      term?.write(event.data)
+      const payload = sanitizeAnsiStreamForTheme(event.data)
+      if (payload) {
+        term?.write(payload)
+      }
     }
   }
 
@@ -220,6 +264,7 @@ onUnmounted(() => {
 watch(resolvedColorScheme, (newScheme) => {
   if (term) {
     term.options.theme = getTerminalTheme(newScheme)
+    term.refresh(0, term.rows - 1)
   }
 })
 
