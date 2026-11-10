@@ -220,6 +220,7 @@ onMounted(() => {
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       fontSize: 13,
       lineHeight: 1.25,
+      allowTransparency: true,
       theme: getTerminalTheme(resolvedColorScheme.value)
     })
 
@@ -227,9 +228,21 @@ onMounted(() => {
     term.loadAddon(fitAddon)
     term.open(terminalEl.value)
 
-    setTimeout(() => {
-      fitAddon?.fit()
-    }, 100)
+    // 立即同步执行 fit 计算，杜绝默认 24 行在挂载初期出现底部未填满空隙
+    try {
+      fitAddon.fit()
+    } catch {
+      // ignore
+    }
+
+    // 在下一渲染帧兜底，确保 flex 容器尺寸微调后精准对齐
+    requestAnimationFrame(() => {
+      try {
+        fitAddon?.fit()
+      } catch {
+        // ignore
+      }
+    })
 
     // 用户在 xterm 敲击键盘输入，直接通过 WebSocket 发往 Python 后端
     term.onData((data) => {
@@ -354,10 +367,17 @@ watch(
 </template>
 
 <style>
-/* 保证 xterm 视口完美撑满容器 */
+/* 保证 xterm 视口完美撑满容器，并彻底覆盖 xterm.css 默认硬编码的 #000 黑底，消除强刷与未填满区域闪黑 */
 .xterm {
   height: 100%;
 }
+
+.xterm,
+.xterm .xterm-viewport,
+.xterm .xterm-screen {
+  background-color: var(--surface-950) !important;
+}
+
 .xterm-viewport {
   overflow-y: auto !important;
 }
