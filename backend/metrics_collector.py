@@ -472,22 +472,34 @@ class HostMetricsService:
         self._locks: Dict[str, asyncio.Lock] = {}
 
     def set_credential(self, host_alias: str, password: Optional[str]):
-        if password:
+        if password is not None:
             self._credentials[host_alias] = password
+            conn = self._connections.pop(host_alias, None)
+            if conn and not conn.is_closed():
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            self._last_raw.pop(host_alias, None)
+            self._last_result.pop(host_alias, None)
 
     def _get_lock(self, host_alias: str) -> asyncio.Lock:
         if host_alias not in self._locks:
             self._locks[host_alias] = asyncio.Lock()
         return self._locks[host_alias]
 
-    async def _get_connection(self, host_alias: str) -> Optional[asyncssh.SSHClientConnection]:
+    async def _get_connection(self, host_alias: str) -> tuple[Optional[asyncssh.SSHClientConnection], Optional[str], Optional[str]]:
+        """
+        获取或建立 SSH 连接，返回 (conn, err_type, err_message)。
+        若认证失败，精确捕获并返回 ('auth_failed', error_message)。
+        """
         conn = self._connections.get(host_alias)
         if conn and not conn.is_closed():
-            return conn
+            return conn, None, None
 
         host_info = find_host_by_alias(host_alias)
         if not host_info:
-            return None
+            return None, "not_found", f"未找到主机: {host_alias}"
 
         conn_kwargs = {
             "host": host_info.hostname,
@@ -510,11 +522,17 @@ class HostMetricsService:
         try:
             new_conn = await asyncssh.connect(**conn_kwargs)
             self._connections[host_alias] = new_conn
-            return new_conn
+            return new_conn, None, None
+        except asyncssh.PermissionDenied as e:
+            self._connections.pop(host_alias, None)
+            return None, "auth_failed", f"身份认证被拒绝 (Permission denied): {str(e)}"
         except Exception as e:
             # 连接失败清理缓存
             self._connections.pop(host_alias, None)
-            return None
+            err_str = str(e).lower()
+            if "permission denied" in err_str or "authentication failed" in err_str or "password auth" in err_str:
+                return None, "auth_failed", f"身份认证失败 (密码错误或缺少私钥): {str(e)}"
+            return None, "connection_error", str(e)
 
     async def fetch_metrics(self, host_alias: str) -> Dict[str, Any]:
         """获取指定主机的 CPU、内存、磁盘、流量等实时性能指标"""
@@ -525,11 +543,20 @@ class HostMetricsService:
             if cached and (now - cached.get("timestamp", 0) < 1.5):
                 return cached
 
-            conn = await self._get_connection(host_alias)
+            conn, err_type, err_msg = await self._get_connection(host_alias)
             if not conn:
+                if err_type == "auth_failed":
+                    return {
+                        "status": "auth_failed",
+                        "auth_failed": True,
+                        "error_type": "auth_failed",
+                        "message": err_msg or "密码不对或未完成认证 (Permission denied)",
+                        "host_alias": host_alias,
+                        "timestamp": now
+                    }
                 return {
                     "status": "error",
-                    "message": "无法建立 SSH 连接或未完成身份认证",
+                    "message": err_msg or "无法建立 SSH 连接",
                     "host_alias": host_alias,
                     "timestamp": now
                 }
@@ -639,11 +666,25 @@ class HostMetricsService:
         深度全页面数据探测：同时采集基础性能指标 + 进程/容器/服务/计划任务/防火墙规则/文件树
         """
         now = time.time()
-        conn = await self._get_connection(host_alias)
+        conn, err_type, err_msg = await self._get_connection(host_alias)
         if not conn:
+            if err_type == "auth_failed":
+                return {
+                    "status": "auth_failed",
+                    "auth_failed": True,
+                    "error_type": "auth_failed",
+                    "message": err_msg or "密码不对或身份认证被拒绝 (Permission denied)",
+                    "host_alias": host_alias,
+                    "timestamp": now,
+                    "metrics": {
+                        "status": "auth_failed",
+                        "auth_failed": True,
+                        "message": err_msg or "密码不对或身份认证被拒绝"
+                    }
+                }
             return {
                 "status": "error",
-                "message": "无法建立 SSH 链路或未配置免密私钥",
+                "message": err_msg or "无法建立 SSH 链路或未配置免密私钥",
                 "host_alias": host_alias,
                 "timestamp": now
             }
@@ -690,10 +731,18 @@ class HostMetricsService:
         """并发获取多台主机的实时系统指标"""
         async def _safe_fetch(alias: str):
             try:
-                # 单机采集最多等 3.5s
-                return alias, await asyncio.wait_for(self.fetch_metrics(alias), timeout=3.5)
+                # 单机采集等待 6.0s，避免并发网络抖动导致被误判截断
+                return alias, await asyncio.wait_for(self.fetch_metrics(alias), timeout=6.0)
             except Exception as e:
-                return alias, {"status": "error", "message": str(e), "host_alias": alias}
+                err_str = str(e).lower()
+                if "permission denied" in err_str or "auth" in err_str:
+                    return alias, {
+                        "status": "auth_failed",
+                        "auth_failed": True,
+                        "message": "身份认证失败 (密码错误或缺少私钥)",
+                        "host_alias": alias
+                    }
+                return alias, {"status": "error", "message": str(e) or "采集超时", "host_alias": alias}
 
         tasks = [_safe_fetch(a) for a in host_aliases]
         results = await asyncio.gather(*tasks, return_exceptions=True)

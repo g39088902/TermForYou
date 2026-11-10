@@ -25,3 +25,6 @@ class TerminalAuthPayload(BaseModel):
     cols: int = 120
     rows: int = 34
     term: str = "xterm-256color"
+
+class SetCredentialPayload(BaseModel):
+    password: str

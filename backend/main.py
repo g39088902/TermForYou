@@ -6,7 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncssh
 
-from models import SshHostInfo, TerminalAuthPayload, CreateHostPayload
+from models import SshHostInfo, TerminalAuthPayload, CreateHostPayload, SetCredentialPayload
 from ssh_config_parser import (
     parse_ssh_config,
     find_host_by_alias,
@@ -104,28 +104,35 @@ async def delete_ssh_host(host_alias: str):
 
 @app.post("/api/v1/ssh/probe/{host_alias}")
 async def probe_host_endpoint(host_alias: str):
-    """探测单台主机的开机状态、端口响应延时及全页面数据"""
+    """探测单台主机的开机状态、端口响应延时及全页面数据，并精确检测是否因密码不对而未接通"""
     host_info = find_host_by_alias(host_alias)
     if not host_info:
         raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
     probe_res = await probe_single_host(host_info.host_alias, host_info.hostname, host_info.port)
     
-    # 若目标开机，进一步探测全页面数据
+    # 若目标开机，进一步探测全页面数据并检测密码/认证状态
     inspection_data = None
+    auth_failed = False
+    auth_message = None
     if probe_res.get("online"):
         try:
             inspection_data = await metrics_service.fetch_full_inspection(host_alias)
-        except Exception:
+            if inspection_data and (inspection_data.get("auth_failed") or inspection_data.get("status") == "auth_failed"):
+                auth_failed = True
+                auth_message = inspection_data.get("message", "密码不对或身份认证被拒绝 (Permission denied)")
+        except Exception as e:
             pass
 
     return {
         **probe_res,
+        "auth_failed": auth_failed,
+        "auth_message": auth_message,
         "inspection": inspection_data
     }
 
 @app.post("/api/v1/ssh/probe-all")
 async def probe_all_hosts_endpoint():
-    """并发批量探测全部服务器的开机与否状态与响应延迟，并对开机服务器并发采集系统全页面核心指标"""
+    """并发批量探测全部服务器的开机与否状态与响应延迟，并对开机服务器并发采集系统全页面核心指标，标识密码错误状态"""
     hosts = parse_ssh_config()
     results = await probe_all_hosts_concurrently(hosts)
 
@@ -137,12 +144,36 @@ async def probe_all_hosts_endpoint():
     metrics_map = {}
     if online_aliases:
         metrics_map = await metrics_service.fetch_all_metrics(online_aliases)
+        # 将密码不对/认证被拒状态回填到 results
+        for alias, m in metrics_map.items():
+            if m and (m.get("auth_failed") or m.get("status") == "auth_failed"):
+                if alias in results:
+                    results[alias]["auth_failed"] = True
+                    results[alias]["auth_message"] = m.get("message", "已开机，但密码不对或未完成认证")
 
     return {
         "status": "ok",
         "count": len(hosts),
         "results": results,
         "metrics": metrics_map
+    }
+
+@app.post("/api/v1/ssh/credentials/{host_alias}")
+async def set_host_credential_endpoint(host_alias: str, payload: SetCredentialPayload):
+    """为指定主机动态配置/更新 SSH 密码并立即重新发起全量深度探测"""
+    host_info = find_host_by_alias(host_alias)
+    if not host_info:
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    metrics_service.set_credential(host_alias, payload.password)
+
+    inspection = await metrics_service.fetch_full_inspection(host_alias)
+    auth_failed = bool(inspection.get("auth_failed") or inspection.get("status") == "auth_failed")
+    return {
+        "status": "ok",
+        "host_alias": host_alias,
+        "auth_failed": auth_failed,
+        "auth_message": inspection.get("message") if auth_failed else None,
+        "inspection": inspection
     }
 
 @app.get("/api/v1/ssh/inspect/{host_alias}")

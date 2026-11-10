@@ -45,6 +45,8 @@ export interface ServerHost {
   probeMessage?: string
   sshBanner?: string
   lastProbedAt?: number
+  authFailed?: boolean
+  authMessage?: string
 }
 
 export interface TerminalEntry {

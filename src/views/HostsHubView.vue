@@ -8,8 +8,10 @@ import {
   deleteHostPermanently,
   addHostPermanently,
   probeAllHosts,
-  toggleAutoProbe
+  toggleAutoProbe,
+  updateHostPassword
 } from '@/stores/workbenchStore'
+import type { ServerHost } from '@/types'
 import {
   Server,
   Terminal,
@@ -25,7 +27,9 @@ import {
   Power,
   PowerOff,
   Radio,
-  Loader2
+  Loader2,
+  KeyRound,
+  X
 } from 'lucide-vue-next'
 
 const newHostName = ref('')
@@ -33,6 +37,37 @@ const newHostIp = ref('')
 const newHostUser = ref('root')
 const newHostPort = ref(22)
 const isAdding = ref(false)
+
+// 密码不对时输入密码弹窗
+const passwordModalOpen = ref(false)
+const targetAuthHost = ref<ServerHost | null>(null)
+const inputPassword = ref('')
+const isSubmittingPassword = ref(false)
+
+function openPasswordModal(host: ServerHost) {
+  targetAuthHost.value = host
+  inputPassword.value = ''
+  passwordModalOpen.value = true
+}
+
+async function handleSavePassword() {
+  if (!targetAuthHost.value) return
+  if (!inputPassword.value) {
+    showToast('请输入 SSH 密码')
+    return
+  }
+  isSubmittingPassword.value = true
+  try {
+    const success = await updateHostPassword(targetAuthHost.value.id, inputPassword.value)
+    if (success) {
+      passwordModalOpen.value = false
+      inputPassword.value = ''
+      targetAuthHost.value = null
+    }
+  } finally {
+    isSubmittingPassword.value = false
+  }
+}
 
 function formatLastConnected(ts?: number) {
   if (!ts) return '从未连接'
@@ -175,6 +210,12 @@ onMounted(() => {
           class="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:border-cyan-400 focus:outline-none w-36"
         />
         <input
+          v-model="newHostUser"
+          type="text"
+          placeholder="用户名 (root)"
+          class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-slate-100 w-28 focus:border-cyan-400 focus:outline-none"
+        />
+        <input
           v-model="newHostIp"
           type="text"
           placeholder="主机 IP / 域名"
@@ -182,16 +223,10 @@ onMounted(() => {
           class="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-slate-100 focus:border-cyan-400 focus:outline-none w-36"
         />
         <input
-          v-model="newHostUser"
-          type="text"
-          placeholder="用户 (root)"
-          class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-slate-100 w-24"
-        />
-        <input
           v-model.number="newHostPort"
           type="number"
-          placeholder="端口"
-          class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-slate-100 w-20"
+          placeholder="端口 (22)"
+          class="px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs font-mono text-slate-100 w-20 focus:border-cyan-400 focus:outline-none"
         />
         <button
           type="submit"
@@ -217,11 +252,13 @@ onMounted(() => {
           <div class="flex items-start justify-between">
             <div class="space-y-1">
               <div class="flex items-center gap-2">
-                <!-- 开机/在线状态指示灯 -->
+                <!-- 开机/在线状态指示灯 (若密码不对则亮起琥珀黄告警灯) -->
                 <span
                   :class="[
                     'w-2.5 h-2.5 rounded-full transition-all shrink-0',
-                    host.powerStatus === 'online'
+                    host.authFailed
+                      ? 'bg-amber-400 shadow-[0_0_8px_#f59e0b]'
+                      : host.powerStatus === 'online'
                       ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]'
                       : host.powerStatus === 'checking'
                       ? 'bg-cyan-400 animate-pulse'
@@ -230,7 +267,9 @@ onMounted(() => {
                       : 'bg-slate-500'
                   ]"
                   :title="
-                    host.powerStatus === 'online'
+                    host.authFailed
+                      ? `已开机 · 但因密码不对或身份认证被拒绝未接通 (${host.authMessage || 'Permission denied'})`
+                      : host.powerStatus === 'online'
                       ? `主机已开机 · 连通正常 (延迟 ${host.pingMs ?? '--'}ms)`
                       : host.powerStatus === 'checking'
                       ? '正在通过网络探测服务器开机状态...'
@@ -244,9 +283,20 @@ onMounted(() => {
                   {{ host.name }}
                 </h2>
 
-                <!-- 开机与否醒目标签 -->
+                <!-- 密码不对未接通醒目标识 -->
                 <span
-                  v-if="host.powerStatus === 'online'"
+                  v-if="host.authFailed"
+                  class="px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1 font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/40 shadow-sm"
+                  :title="`主机已开机 · 但因密码不对或未完成认证未接通 (${host.authMessage || 'Permission denied'})`"
+                >
+                  <KeyRound class="w-3 h-3 text-amber-400" />
+                  <span>密码不对 · 未接通</span>
+                  <span v-if="host.pingMs !== undefined" class="font-mono text-[9px] text-amber-400/90">{{ host.pingMs }}ms</span>
+                </span>
+
+                <!-- 开机连通正常醒目标签 -->
+                <span
+                  v-else-if="host.powerStatus === 'online'"
                   class="px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1 font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
                   :title="`主机已开机 · SSH 端口活跃${host.pingMs !== undefined ? ` · 往返延迟 ${host.pingMs}ms` : ''}${host.sshBanner ? ` · ${host.sshBanner}` : ''}`"
                 >
@@ -360,6 +410,24 @@ onMounted(() => {
             </span>
           </div>
 
+          <!-- 密码不对未接通时的醒目警告横幅与快捷输入密码入口 -->
+          <div
+            v-if="host.authFailed"
+            class="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-amber-950/60 border border-amber-500/40 text-amber-200 text-xs shadow-sm"
+          >
+            <div class="flex items-center gap-1.5 truncate">
+              <KeyRound class="w-3.5 h-3.5 text-amber-400 shrink-0" />
+              <span class="truncate font-medium text-[11px]">{{ host.authMessage || '密码错误或身份认证被拒绝，未接通系统' }}</span>
+            </div>
+            <button
+              type="button"
+              @click.stop="openPasswordModal(host)"
+              class="shrink-0 px-2 py-0.5 text-[10px] rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-semibold transition cursor-pointer"
+            >
+              输入密码
+            </button>
+          </div>
+
           <!-- 实时健康快照条：未探测的主机显示中立占位符 '--'，不使用任何编造的假数值 -->
           <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 text-xs">
             <div class="bg-slate-950/80 p-2 rounded-lg border border-slate-800/80">
@@ -442,6 +510,66 @@ onMounted(() => {
             </button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- 针对密码不对的主机快速输入密码弹窗 -->
+    <div
+      v-if="passwordModalOpen && targetAuthHost"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      @click.self="passwordModalOpen = false"
+    >
+      <div class="bg-slate-900 border border-slate-800 rounded-xl max-w-md w-full p-5 shadow-2xl space-y-4">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div class="flex items-center gap-2">
+            <KeyRound class="w-5 h-5 text-amber-400" />
+            <h3 class="text-sm font-bold text-slate-100">输入服务器 SSH 连接密码</h3>
+          </div>
+          <button
+            @click="passwordModalOpen = false"
+            class="text-slate-400 hover:text-slate-200 p-1 rounded-lg hover:bg-slate-800 cursor-pointer"
+          >
+            <X class="w-4 h-4" />
+          </button>
+        </div>
+
+        <div class="text-xs text-slate-300 space-y-2">
+          <p>
+            服务器 <span class="font-bold text-cyan-400">「{{ targetAuthHost.name }}」</span>
+            ({{ targetAuthHost.user }}@{{ targetAuthHost.ip }}:{{ targetAuthHost.port }}) 已开机，但因密码不匹配或未配置免密私钥而未接通。
+          </p>
+          <p class="text-slate-400 text-[11px]">
+            请输入该主机的登录密码，TermForYou 将立即进行认证验证并同步宿主机全量系统数据：
+          </p>
+        </div>
+
+        <form @submit.prevent="handleSavePassword" class="space-y-4">
+          <input
+            v-model="inputPassword"
+            type="password"
+            autofocus
+            placeholder="请输入 SSH 用户密码"
+            class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-sm font-mono text-slate-100 focus:border-cyan-400 focus:outline-none"
+          />
+
+          <div class="flex items-center justify-end gap-2 pt-2">
+            <button
+              type="button"
+              @click="passwordModalOpen = false"
+              class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 cursor-pointer"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              :disabled="isSubmittingPassword || !inputPassword"
+              class="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+            >
+              <Loader2 v-if="isSubmittingPassword" class="w-3.5 h-3.5 animate-spin" />
+              <span>{{ isSubmittingPassword ? '正在验证连接...' : '验证密码并接通' }}</span>
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   </div>

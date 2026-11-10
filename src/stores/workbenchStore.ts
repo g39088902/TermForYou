@@ -870,6 +870,8 @@ export interface ProbeResultItem {
   banner: string | null
   message: string
   timestamp: number
+  auth_failed?: boolean
+  auth_message?: string
 }
 
 // 批量并发探测所有服务器开机状态
@@ -903,6 +905,7 @@ export async function probeAllHosts(silent = false) {
     const metricsMap = data.metrics || {}
 
     let onlineCount = 0
+    let authFailedCount = 0
     let offlineCount = 0
 
     for (const host of store.hosts) {
@@ -914,14 +917,27 @@ export async function probeAllHosts(silent = false) {
         host.probeMessage = probeRes.message
         host.lastProbedAt = probeRes.timestamp ? probeRes.timestamp * 1000 : Date.now()
 
-        if (probeRes.online) {
+        const m = metricsMap[host.id]
+        const isAuthFailed = Boolean(
+          probeRes.auth_failed || (m && (m.status === 'auth_failed' || m.auth_failed))
+        )
+        host.authFailed = isAuthFailed
+        if (isAuthFailed) {
+          authFailedCount++
+          host.authMessage = probeRes.auth_message || m?.message || '密码错误或身份认证被拒绝 (Permission denied)'
+          host.status = 'warning'
+          host.metricsStatus = 'error'
+        } else {
+          host.authMessage = undefined
+        }
+
+        if (probeRes.online && !isAuthFailed) {
           onlineCount++
-          if (host.status === 'unconnected' || host.status === 'offline') {
+          if (host.status === 'unconnected' || host.status === 'offline' || host.status === 'warning') {
             host.status = 'online'
           }
 
           // 同步后端并发采集的真实指标数据，填充卡片所有健康项
-          const m = metricsMap[host.id]
           if (m && m.status === 'online') {
             host.cpuUsage = m.cpuUsage
             if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
@@ -943,7 +959,7 @@ export async function probeAllHosts(silent = false) {
             host.metricsStatus = 'synced'
             host.lastMetricsUpdate = Date.now()
           }
-        } else {
+        } else if (!probeRes.online) {
           offlineCount++
           host.status = 'offline'
         }
@@ -958,7 +974,11 @@ export async function probeAllHosts(silent = false) {
     }
 
     if (!silent) {
-      showToast(`全量探测完成：${onlineCount} 台在线（已同步全页面数据），${offlineCount} 台离线`)
+      if (authFailedCount > 0) {
+        showToast(`全量探测完成：${onlineCount} 台连通正常，${authFailedCount} 台因密码不对未接通，${offlineCount} 台离线`)
+      } else {
+        showToast(`全量探测完成：${onlineCount} 台在线（已同步全页面数据），${offlineCount} 台离线`)
+      }
     }
   } catch (err) {
     store.hosts.forEach((h) => {
@@ -1011,7 +1031,7 @@ if (typeof window !== 'undefined') {
 }
 
 export interface HostMetricsResponse {
-  status: 'online' | 'error'
+  status: 'online' | 'error' | 'auth_failed'
   host_alias: string
   timestamp: number
   cpuUsage: number
@@ -1032,6 +1052,7 @@ export interface HostMetricsResponse {
   firewallBackend?: 'ufw' | 'firewalld' | 'iptables'
   firewallEnabled?: boolean
   message?: string
+  auth_failed?: boolean
 }
 
 let metricsTimer: ReturnType<typeof setInterval> | null = null
@@ -1166,8 +1187,22 @@ export async function probeHost(hostId: string) {
         host.status = 'offline'
       }
 
+      // 识别是否因密码不对或认证失败而未接通
+      const isAuthFailed = Boolean(
+        probeRes.auth_failed ||
+        (probeRes.inspection && (probeRes.inspection.status === 'auth_failed' || probeRes.inspection.auth_failed))
+      )
+      host.authFailed = isAuthFailed
+      if (isAuthFailed) {
+        host.authMessage = probeRes.auth_message || probeRes.inspection?.message || '密码错误或身份认证被拒绝 (Permission denied)'
+        host.status = 'warning'
+        host.metricsStatus = 'error'
+      } else {
+        host.authMessage = undefined
+      }
+
       // 若后端已返回全页面深度探测数据
-      if (probeRes.inspection && (probeRes.inspection.status === 'ok' || probeRes.inspection.status === 'partial')) {
+      if (!isAuthFailed && probeRes.inspection && (probeRes.inspection.status === 'ok' || probeRes.inspection.status === 'partial')) {
         const insp = probeRes.inspection
         if (insp.metrics && insp.metrics.status === 'online') {
           const m = insp.metrics
@@ -1200,7 +1235,7 @@ export async function probeHost(hostId: string) {
           if (Array.isArray(insp.firewallRules) && insp.firewallRules.length > 0) store.firewallRules = insp.firewallRules
           if (Array.isArray(insp.files) && insp.files.length > 0) store.files = insp.files
         }
-      } else if (host.powerStatus === 'online') {
+      } else if (!isAuthFailed && host.powerStatus === 'online') {
         await inspectHost(hostId)
       }
     }
@@ -1208,12 +1243,54 @@ export async function probeHost(hostId: string) {
     // 忽略错误
   }
 
-  // 若处于开机状态，更新提示
-  if (host.powerStatus === 'online') {
+  // 状态反馈提示
+  if (host.authFailed) {
+    showToast(`探测提示:「${host.name}」已开机，但因密码不对未接通 (身份认证失败)`)
+  } else if (host.powerStatus === 'online') {
     showToast(`深度探测成功:「${host.name}」已开机 (响应 ${host.pingMs || 0}ms · CPU ${host.cpuUsage ?? '--'}%${host.os ? ` · ${host.os}` : ''})`)
   } else {
     host.metricsStatus = 'error'
     showToast(`探测完成:「${host.name}」未能连通 (目标可能关机或网络不可达)`)
+  }
+}
+
+// 为主机更新 SSH 密码凭证并重新验证连接
+export async function updateHostPassword(hostId: string, password: string): Promise<boolean> {
+  const host = store.hosts.find((h) => h.id === hostId)
+  if (!host) return false
+
+  showToast(`正在验证「${host.name}」的新连接密码...`)
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/credentials/${encodeURIComponent(hostId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    })
+    if (!res.ok) {
+      showToast('设置密码失败：后端服务异常')
+      return false
+    }
+    const data = await res.json()
+    if (data.auth_failed) {
+      host.authFailed = true
+      host.authMessage = data.auth_message || '密码仍不正确，请重新输入'
+      showToast(`密码验证失败：服务器拒绝了该密码`)
+      return false
+    }
+
+    // 认证通过
+    host.authFailed = false
+    host.authMessage = undefined
+    host.powerStatus = 'online'
+    host.status = 'online'
+    showToast(`密码验证成功！已连通服务器「${host.name}」并同步全页面数据`)
+
+    // 重新探测全量数据
+    await probeHost(hostId)
+    return true
+  } catch {
+    showToast(`提交密码失败：无法连接后端服务`)
+    return false
   }
 }
 
