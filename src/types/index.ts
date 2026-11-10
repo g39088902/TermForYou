@@ -16,26 +16,26 @@ export interface ServerHost {
   port: number
   user: string
   group: string
-  os: string
-  kernel: string
-  uptime: string
-  status: 'online' | 'warning' | 'offline'
+  os?: string
+  kernel?: string
+  uptime?: string
+  status: 'online' | 'warning' | 'offline' | 'unconnected'
   tags: string[]
-  cpuUsage: number
-  cpuCores: number[]
-  loadAvg: [number, number, number]
-  memUsedGb: number
-  memTotalGb: number
-  swapUsedGb: number
-  swapTotalGb: number
-  diskUsedPercent: number
+  cpuUsage?: number
+  cpuCores?: number[]
+  loadAvg?: [number, number, number]
+  memUsedGb?: number
+  memTotalGb?: number
+  swapUsedGb?: number
+  swapTotalGb?: number
+  diskUsedPercent?: number
   diskTotalGb?: number
   diskUsedGb?: number
-  netUpKbps: number
-  netDownKbps: number
-  firewallEnabled: boolean
-  firewallBackend: 'ufw' | 'firewalld' | 'iptables'
-  currentCwd: string
+  netUpKbps?: number
+  netDownKbps?: number
+  firewallEnabled?: boolean
+  firewallBackend?: 'ufw' | 'firewalld' | 'iptables'
+  currentCwd?: string
   metricsStatus?: 'idle' | 'updating' | 'synced' | 'error'
   lastMetricsUpdate?: number
 }

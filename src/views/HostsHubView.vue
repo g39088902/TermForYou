@@ -1,17 +1,17 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { store, showToast } from '@/stores/workbenchStore'
+import { store, showToast, probeHost } from '@/stores/workbenchStore'
 import {
   Server,
   Terminal,
   Plus,
-  KeyRound,
   ShieldCheck,
   ShieldAlert,
   Cpu,
   HardDrive,
   FolderGit2,
-  Trash2
+  Trash2,
+  RefreshCw
 } from 'lucide-vue-next'
 
 const newHostName = ref('')
@@ -59,31 +59,17 @@ function removeHost(hostId: string, hostName: string) {
 function quickAddHost() {
   if (!newHostName.value.trim() || !newHostIp.value.trim()) return
   const id = `host-${Date.now()}`
+  // 保持纯净的真实状态，未探测的硬件、系统与服务指标不使用任何假数据填充
   store.hosts.push({
     id,
     name: newHostName.value.trim(),
     ip: newHostIp.value.trim(),
-    port: newHostPort.value,
-    user: newHostUser.value,
+    port: newHostPort.value || 22,
+    user: newHostUser.value.trim() || 'root',
     group: '自定义新增节点',
-    os: 'Ubuntu 24.04 LTS',
-    kernel: '6.8.0-generic',
-    uptime: '1 天 02 小时',
-    status: 'online',
-    tags: ['SSH直连', '新节点'],
-    cpuUsage: 12,
-    cpuCores: [10, 14, 12, 11],
-    loadAvg: [0.24, 0.19, 0.15],
-    memUsedGb: 1.8,
-    memTotalGb: 8,
-    swapUsedGb: 0,
-    swapTotalGb: 2,
-    diskUsedPercent: 28,
-    netUpKbps: 120,
-    netDownKbps: 85,
-    firewallEnabled: true,
-    firewallBackend: 'ufw',
-    currentCwd: '/root'
+    status: 'unconnected',
+    tags: ['自定义节点'],
+    metricsStatus: 'idle'
   })
   newHostName.value = ''
   newHostIp.value = ''
@@ -127,7 +113,7 @@ function quickAddHost() {
         />
         <button
           type="submit"
-          class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white cursor-pointer"
+          class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white cursor-pointer transition"
         >
           <Plus class="w-3.5 h-3.5" />
           <span>快速添加并连接</span>
@@ -148,18 +134,36 @@ function quickAddHost() {
           <div class="flex items-start justify-between">
             <div>
               <div class="flex items-center gap-2">
+                <!-- 真实探测状态灯：仅当真正连通并同步过指标时才点亮绿灯，否则如实呈现未连接/探测中/离线状态 -->
                 <span
                   :class="[
-                    'w-2.5 h-2.5 rounded-full',
-                    host.status === 'online' ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]' : 'bg-amber-400'
+                    'w-2.5 h-2.5 rounded-full transition-all',
+                    host.status === 'online' && host.lastMetricsUpdate
+                      ? 'bg-emerald-400 shadow-[0_0_8px_#34d399]'
+                      : host.metricsStatus === 'updating'
+                      ? 'bg-cyan-400 animate-pulse'
+                      : host.status === 'offline' || host.metricsStatus === 'error'
+                      ? 'bg-rose-500'
+                      : 'bg-slate-500'
                   ]"
+                  :title="
+                    host.status === 'online' && host.lastMetricsUpdate
+                      ? 'SSH 连通 · 指标已实时同步'
+                      : host.metricsStatus === 'updating'
+                      ? '正在通过 SSH 探测连通性与性能数据...'
+                      : host.status === 'offline' || host.metricsStatus === 'error'
+                      ? '探测失败或主机离线'
+                      : '尚未连接 · 待探测'
+                  "
                 />
                 <h2 class="text-sm font-bold text-slate-100 group-hover:text-cyan-300 transition">
                   {{ host.name }}
                 </h2>
               </div>
               <div class="text-xs font-mono text-slate-400 mt-0.5">
-                {{ host.user }}@{{ host.ip }}:{{ host.port }} · {{ host.os }}
+                {{ host.user }}@{{ host.ip }}:{{ host.port }}
+                <span v-if="host.os" class="text-slate-300"> · {{ host.os }}</span>
+                <span v-else class="text-slate-500"> · 系统待探测</span>
               </div>
             </div>
 
@@ -188,34 +192,54 @@ function quickAddHost() {
             >
               {{ tag }}
             </span>
+
+            <!-- 防火墙状态：真实探测到才显示运行状态，未知时不虚构任何规则或类型 -->
             <span
+              v-if="host.firewallBackend"
               :class="[
                 'px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1',
                 host.firewallEnabled
                   ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
                   : 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
               ]"
+              :title="`宿主机底层防火墙: ${host.firewallBackend.toUpperCase()} | 状态: ${host.firewallEnabled ? '运行中且防护中' : '未开启或已停止'}`"
             >
               <ShieldCheck v-if="host.firewallEnabled" class="w-3 h-3" />
               <ShieldAlert v-else class="w-3 h-3" />
-              {{ host.firewallBackend.toUpperCase() }}
+              {{ host.firewallBackend.toUpperCase() }}: {{ host.firewallEnabled ? '防护中' : '未开启' }}
+            </span>
+            <span
+              v-else
+              class="px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1 bg-slate-800/80 text-slate-400 border border-slate-700/60"
+              title="尚未探测该主机的防火墙组件及运行状态"
+            >
+              <ShieldAlert class="w-3 h-3 opacity-50" />
+              防火墙: 未检测
             </span>
           </div>
 
-          <!-- 实时健康快照条 -->
+          <!-- 实时健康快照条：未探测的主机显示中立占位符 '--'，不使用任何编造的假数值 -->
           <div class="grid grid-cols-3 gap-2 pt-2 border-t border-slate-800/80 text-xs">
             <div class="bg-slate-950/80 p-2 rounded-lg border border-slate-800/80">
               <div class="text-[10px] text-slate-400 flex items-center gap-1">
                 <Cpu class="w-3 h-3 text-cyan-400" />
                 <span>CPU 负载</span>
               </div>
-              <div class="font-mono font-bold text-slate-100 mt-0.5">{{ host.cpuUsage }}%</div>
+              <div
+                class="font-mono font-bold mt-0.5"
+                :class="host.cpuUsage !== undefined ? 'text-slate-100' : 'text-slate-500'"
+              >
+                {{ host.cpuUsage !== undefined ? `${host.cpuUsage}%` : '--' }}
+              </div>
             </div>
 
             <div class="bg-slate-950/80 p-2 rounded-lg border border-slate-800/80">
               <div class="text-[10px] text-slate-400">内存占用</div>
-              <div class="font-mono font-bold text-cyan-300 mt-0.5">
-                {{ host.memUsedGb }}/{{ host.memTotalGb }}G
+              <div
+                class="font-mono font-bold mt-0.5"
+                :class="host.memUsedGb !== undefined && host.memTotalGb !== undefined ? 'text-cyan-300' : 'text-slate-500'"
+              >
+                {{ host.memUsedGb !== undefined && host.memTotalGb !== undefined ? `${host.memUsedGb}/${host.memTotalGb}G` : '--' }}
               </div>
             </div>
 
@@ -224,26 +248,53 @@ function quickAddHost() {
                 <HardDrive class="w-3 h-3 text-indigo-400" />
                 <span>磁盘使用</span>
               </div>
-              <div class="font-mono font-bold text-indigo-300 mt-0.5">{{ host.diskUsedPercent }}%</div>
+              <div
+                class="font-mono font-bold mt-0.5"
+                :class="host.diskUsedPercent !== undefined ? 'text-indigo-300' : 'text-slate-500'"
+              >
+                {{ host.diskUsedPercent !== undefined ? `${host.diskUsedPercent}%` : '--' }}
+              </div>
             </div>
           </div>
         </div>
 
         <!-- 底部操作按钮 -->
         <div class="flex items-center justify-between pt-4 mt-4 border-t border-slate-800/80">
-          <div class="flex items-center gap-1 text-[11px] text-slate-400 font-mono">
-            <FolderGit2 class="w-3.5 h-3.5 text-amber-400" />
-            <span>{{ host.currentCwd }}</span>
+          <div
+            class="flex items-center gap-1 text-[11px] font-mono"
+            :class="host.currentCwd ? 'text-slate-400' : 'text-slate-600'"
+            :title="host.currentCwd ? `当前终端工作目录: ${host.currentCwd}` : '尚未建立连接会话'"
+          >
+            <FolderGit2 class="w-3.5 h-3.5" :class="host.currentCwd ? 'text-amber-400' : 'text-slate-600'" />
+            <span>{{ host.currentCwd || '--' }}</span>
           </div>
 
-          <button
-            type="button"
-            @click="connectHost(host.id)"
-            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition cursor-pointer"
-          >
-            <Terminal class="w-3.5 h-3.5" />
-            <span>进入综合工作台</span>
-          </button>
+          <div class="flex items-center gap-2">
+            <!-- 单机即时探测按钮 -->
+            <button
+              type="button"
+              @click.stop="probeHost(host.id)"
+              :disabled="host.metricsStatus === 'updating'"
+              :title="host.metricsStatus === 'updating' ? '探测中...' : '测试 SSH 连通性并采集真实系统指标'"
+              class="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-cyan-300 border border-slate-700 transition cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw
+                class="w-3.5 h-3.5"
+                :class="{ 'animate-spin text-cyan-400': host.metricsStatus === 'updating' }"
+              />
+              <span class="sr-only">探测连通性</span>
+            </button>
+
+            <!-- 进入终端工作台 -->
+            <button
+              type="button"
+              @click="connectHost(host.id)"
+              class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition cursor-pointer shadow-sm hover:shadow-cyan-500/20"
+            >
+              <Terminal class="w-3.5 h-3.5" />
+              <span>进入综合工作台</span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

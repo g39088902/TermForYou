@@ -36,18 +36,18 @@ async function handleManualRefresh() {
 }
 
 const cpuColorClass = computed(() => {
-  const usage = currentHost.value.cpuUsage
+  const usage = currentHost.value?.cpuUsage ?? 0
   if (usage >= 80) return 'text-rose-400 font-bold'
   if (usage >= 60) return 'text-amber-400 font-bold'
   return 'text-emerald-400 font-semibold'
 })
 
 const memPercent = computed(() => {
-  const total = currentHost.value.memTotalGb || 1
-  return Math.round((currentHost.value.memUsedGb / total) * 100)
+  const total = currentHost.value?.memTotalGb || 1
+  return Math.round(((currentHost.value?.memUsedGb ?? 0) / total) * 100)
 })
 
-function formatSpeed(kbPerSec: number): string {
+function formatSpeed(kbPerSec?: number): string {
   if (!kbPerSec || kbPerSec <= 0) return '0 KB/s'
   if (kbPerSec >= 1024) {
     return `${(kbPerSec / 1024).toFixed(2)} MB/s`
@@ -63,7 +63,7 @@ function formatSpeed(kbPerSec: number): string {
       <!-- 主机网络标识 -->
       <span
         class="text-[11px] font-mono text-slate-400 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 shrink-0 whitespace-nowrap"
-        :title="`系统内核: ${currentHost.kernel} | 运行时间: ${currentHost.uptime}`"
+        :title="`系统内核: ${currentHost.kernel || '待检测'} | 运行时间: ${currentHost.uptime || '待检测'}`"
       >
         {{ currentHost.user }}@{{ currentHost.ip }}:{{ currentHost.port }}
       </span>
@@ -71,11 +71,11 @@ function formatSpeed(kbPerSec: number): string {
       <!-- 操作系统版本 (完整名称展示，不省略) -->
       <span
         class="flex items-center gap-1.5 text-[11px] font-mono px-2 py-0.5 rounded bg-slate-950/90 border border-slate-800/90 text-slate-300 shrink-0 whitespace-nowrap"
-        :title="`操作系统完整版本: ${currentHost.os}\n系统内核: ${currentHost.kernel}`"
+        :title="`操作系统完整版本: ${currentHost.os || '待探测'}\n系统内核: ${currentHost.kernel || '待检测'}`"
       >
         <Layers class="w-3 h-3 text-cyan-400 shrink-0" />
         <span class="text-slate-400 text-[10px]">OS</span>
-        <span class="text-slate-200 font-medium whitespace-nowrap">{{ currentHost.os }}</span>
+        <span class="text-slate-200 font-medium whitespace-nowrap">{{ currentHost.os || '系统待检测' }}</span>
       </span>
 
       <!-- 实时 CPU / 内存 / 负载指标块 (点击直达性能与进程中心) -->
@@ -89,19 +89,19 @@ function formatSpeed(kbPerSec: number): string {
           })
         "
         class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer shrink-0 whitespace-nowrap"
-        :title="`点击查看性能与进程详情 (Load: ${currentHost.loadAvg.join(', ')})`"
+        :title="`点击查看性能与进程详情 (Load: ${currentHost.loadAvg ? currentHost.loadAvg.join(', ') : '--'})`"
       >
         <Cpu class="w-3.5 h-3.5 text-cyan-400 shrink-0" />
         <span class="text-slate-400">CPU</span>
         <span :class="['font-mono transition-colors duration-200', cpuColorClass]">
-          {{ currentHost.cpuUsage }}%
+          {{ currentHost.cpuUsage !== undefined ? `${currentHost.cpuUsage}%` : '--' }}
         </span>
         <span class="text-slate-600">|</span>
         <span class="text-slate-400">MEM</span>
         <span class="font-mono text-cyan-300">
-          {{ currentHost.memUsedGb }}/{{ currentHost.memTotalGb }}GB
+          {{ currentHost.memUsedGb !== undefined && currentHost.memTotalGb ? `${currentHost.memUsedGb}/${currentHost.memTotalGb}GB` : '--' }}
         </span>
-        <span class="text-[10px] text-slate-500 font-mono">({{ memPercent }}%)</span>
+        <span class="text-[10px] text-slate-500 font-mono">({{ currentHost.memUsedGb !== undefined ? `${memPercent}%` : '--' }})</span>
       </button>
 
       <!-- 磁盘使用率 (点击直达文件管理中心) -->
@@ -120,7 +120,7 @@ function formatSpeed(kbPerSec: number): string {
       >
         <HardDrive class="w-3.5 h-3.5 text-indigo-400 shrink-0" />
         <span class="text-slate-400">Disk</span>
-        <span class="font-mono text-indigo-300">{{ currentHost.diskUsedPercent }}%</span>
+        <span class="font-mono text-indigo-300">{{ currentHost.diskUsedPercent !== undefined ? `${currentHost.diskUsedPercent}%` : '--' }}</span>
       </button>
 
       <!-- 实时上下行网速 -->
@@ -171,15 +171,18 @@ function formatSpeed(kbPerSec: number): string {
         "
         :class="[
           'flex items-center gap-1.5 px-2.5 py-1 rounded border transition cursor-pointer shrink-0 whitespace-nowrap',
-          currentHost.firewallEnabled
+          !currentHost.firewallBackend
+            ? 'bg-slate-950/90 border-slate-800/90 text-slate-400 hover:bg-slate-800'
+            : currentHost.firewallEnabled
             ? 'bg-emerald-950/40 border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/40'
             : 'bg-rose-950/50 border-rose-700/50 text-rose-300 hover:bg-rose-900/40'
         ]"
-        :title="`宿主机底层防火墙: ${currentHost.firewallBackend.toUpperCase()} | 状态: ${currentHost.firewallEnabled ? '运行中且生效' : '服务未激活或已停止'}\n点击直达防火墙管理与端口矩阵`"
+        :title="currentHost.firewallBackend ? `宿主机底层防火墙: ${currentHost.firewallBackend.toUpperCase()} | 状态: ${currentHost.firewallEnabled ? '运行中且生效' : '服务未激活或已停止'}\n点击直达防火墙管理与端口矩阵` : '尚未探测到防火墙状态'"
       >
-        <ShieldCheck v-if="currentHost.firewallEnabled" class="w-3.5 h-3.5" />
+        <ShieldCheck v-if="currentHost.firewallBackend && currentHost.firewallEnabled" class="w-3.5 h-3.5" />
         <ShieldAlert v-else class="w-3.5 h-3.5" />
-        <span>{{ currentHost.firewallBackend.toUpperCase() }}: {{ currentHost.firewallEnabled ? '防护中' : '未开启' }}</span>
+        <span v-if="currentHost.firewallBackend">{{ currentHost.firewallBackend.toUpperCase() }}: {{ currentHost.firewallEnabled ? '防护中' : '未开启' }}</span>
+        <span v-else>防火墙: 未检测</span>
       </button>
 
       <!-- 当前 CWD 路径联动徽章 -->
@@ -189,7 +192,7 @@ function formatSpeed(kbPerSec: number): string {
           navigateWithContext({
             sourcePage: store.activePage,
             targetPage: 'P3_FILES',
-            reason: `在文件管理器打开当前终端工作目录 ${currentHost.currentCwd}`,
+            reason: `在文件管理器打开当前终端工作目录 ${currentHost.currentCwd || '~'}`,
             openPath: currentHost.currentCwd
           })
         "
@@ -197,7 +200,7 @@ function formatSpeed(kbPerSec: number): string {
         title="点击在文件管理全屏页打开该路径"
       >
         <FolderSync class="w-3.5 h-3.5 text-amber-400" />
-        <span>CWD: {{ currentHost.currentCwd }}</span>
+        <span>CWD: {{ currentHost.currentCwd || '--' }}</span>
       </button>
     </div>
 

@@ -132,8 +132,9 @@ function saveFirewallRuleToSnippets() {
         <div>
           <h1 class="text-sm font-bold text-slate-100 flex items-center gap-2">
             <Shield class="w-4 h-4 text-cyan-400" />
-            <span>端口监听与防火墙对照 ({{ currentHost.firewallBackend.toUpperCase() }})</span>
+            <span>端口监听与防火墙对照 ({{ (currentHost.firewallBackend || '待探测').toUpperCase() }})</span>
             <span
+              v-if="currentHost.firewallBackend"
               :class="[
                 'text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1',
                 currentHost.firewallEnabled
@@ -144,6 +145,13 @@ function saveFirewallRuleToSnippets() {
               <ShieldCheck v-if="currentHost.firewallEnabled" class="w-3 h-3" />
               <ShieldAlert v-else class="w-3 h-3" />
               {{ currentHost.firewallEnabled ? '服务运行中' : '未开启 / 已停止' }}
+            </span>
+            <span
+              v-else
+              class="text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1 bg-slate-800 text-slate-400 border-slate-700"
+            >
+              <ShieldAlert class="w-3 h-3 opacity-50" />
+              未检测
             </span>
           </h1>
           <p class="text-xs text-slate-400 mt-0.5">
@@ -234,7 +242,7 @@ function saveFirewallRuleToSnippets() {
     <div class="rounded-xl bg-slate-900/90 border border-cyan-500/30 p-4 space-y-3">
       <div class="text-xs font-bold text-slate-100 flex items-center gap-2">
         <Plus class="w-4 h-4 text-cyan-400" />
-        <span>新增入站防火墙规则 (实时生成底层 {{ currentHost.firewallBackend.toUpperCase() }} 命令)</span>
+        <span>新增入站防火墙规则 (实时生成底层 {{ (currentHost.firewallBackend || 'ufw').toUpperCase() }} 命令)</span>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">

@@ -752,24 +752,9 @@ export async function loadSshHostsFromBackend() {
         port: h.port,
         user: h.user,
         group: '~/.ssh/config 本地配置',
-        os: 'Linux (SSH直连)',
-        kernel: 'SSH2 / PTY',
-        uptime: '检测就绪',
-        status: 'online',
+        status: 'unconnected',
         tags: h.identity_files.length > 0 ? ['密钥认证', ...h.identity_files.map(k => k.split('/').pop() || 'key')] : ['免密/密码认证'],
-        cpuUsage: 18,
-        cpuCores: [15, 20, 18, 14],
-        loadAvg: [0.35, 0.28, 0.22],
-        memUsedGb: 3.2,
-        memTotalGb: 8,
-        swapUsedGb: 0.1,
-        swapTotalGb: 2,
-        diskUsedPercent: 35,
-        netUpKbps: 45,
-        netDownKbps: 120,
-        firewallEnabled: false,
-        firewallBackend: 'iptables',
-        currentCwd: '~'
+        metricsStatus: 'idle'
       }))
 
       // 同步更新打开的会话标签
@@ -822,6 +807,7 @@ export async function fetchHostMetrics(hostId: string) {
     const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/metrics/${encodeURIComponent(hostId)}`)
     if (!res.ok) {
       targetHost.metricsStatus = 'error'
+      targetHost.status = 'offline'
       return
     }
     const data: HostMetricsResponse = await res.json()
@@ -849,10 +835,24 @@ export async function fetchHostMetrics(hostId: string) {
       targetHost.metricsStatus = 'synced'
       targetHost.lastMetricsUpdate = Date.now()
     } else {
+      targetHost.status = 'offline'
       targetHost.metricsStatus = 'error'
     }
   } catch {
+    targetHost.status = 'offline'
     targetHost.metricsStatus = 'error'
+  }
+}
+
+export async function probeHost(hostId: string) {
+  const host = store.hosts.find((h) => h.id === hostId)
+  if (!host) return
+  showToast(`正在探测主机「${host.name}」的实时系统与性能指标...`)
+  await fetchHostMetrics(hostId)
+  if (host.status === 'online') {
+    showToast(`探测成功:「${host.name}」(${host.os || 'Linux'}) 运行正常`)
+  } else {
+    showToast(`探测失败: 无法连通「${host.name}」(${host.ip})`)
   }
 }
 
@@ -942,7 +942,7 @@ export function executeTerminalCommand(cmd: string, switchToWorkbench = false) {
   store.terminalHistory.push({
     id: `term-${Date.now()}`,
     timestamp: timeStr,
-    cwd: currentHost.value.currentCwd,
+    cwd: currentHost.value.currentCwd || '~',
     command: trimmed,
     output: simulatedOutput,
     exitCode: 0,

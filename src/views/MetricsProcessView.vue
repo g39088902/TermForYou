@@ -81,7 +81,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
 
         <div class="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-800/80 font-mono">
           <span>Load Avg (1/5/15m):</span>
-          <span class="text-slate-200">{{ currentHost.loadAvg.join(' / ') }}</span>
+          <span class="text-slate-200">{{ currentHost.loadAvg ? currentHost.loadAvg.join(' / ') : '--' }}</span>
         </div>
       </div>
 
@@ -94,7 +94,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
               <span>物理内存与 Swap 交换分区</span>
             </div>
             <span class="font-mono text-sm font-bold text-emerald-300">
-              {{ currentHost.memUsedGb }} / {{ currentHost.memTotalGb }} GB
+              {{ currentHost.memUsedGb !== undefined && currentHost.memTotalGb !== undefined ? `${currentHost.memUsedGb} / ${currentHost.memTotalGb} GB` : '--' }}
             </span>
           </div>
 
@@ -102,18 +102,18 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
             <div class="flex justify-between text-[11px] text-slate-400">
               <span>已用物理内存 (Used + Buffers/Cache)</span>
               <span class="font-mono text-slate-200">
-                {{ Math.round((currentHost.memUsedGb / currentHost.memTotalGb) * 100) }}%
+                {{ currentHost.memUsedGb !== undefined && currentHost.memTotalGb ? `${Math.round((currentHost.memUsedGb / currentHost.memTotalGb) * 100)}%` : '--' }}
               </span>
             </div>
             <div class="h-2.5 rounded-full bg-slate-950 border border-slate-800 overflow-hidden flex">
               <div
                 class="bg-emerald-500 h-full"
-                :style="{ width: `${(currentHost.memUsedGb / currentHost.memTotalGb) * 80}%` }"
+                :style="{ width: `${currentHost.memTotalGb ? (currentHost.memUsedGb! / currentHost.memTotalGb) * 80 : 0}%` }"
                 title="应用独占内存"
               />
               <div
                 class="bg-cyan-500/60 h-full"
-                :style="{ width: `${(currentHost.memUsedGb / currentHost.memTotalGb) * 20}%` }"
+                :style="{ width: `${currentHost.memTotalGb ? (currentHost.memUsedGb! / currentHost.memTotalGb) * 20 : 0}%` }"
                 title="PageCache / Buffers"
               />
             </div>
@@ -123,13 +123,13 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
             <div class="flex justify-between text-[11px] text-slate-400">
               <span>Swap 交换分区</span>
               <span class="font-mono text-slate-300">
-                {{ currentHost.swapUsedGb }} / {{ currentHost.swapTotalGb }} GB
+                {{ currentHost.swapUsedGb !== undefined && currentHost.swapTotalGb !== undefined ? `${currentHost.swapUsedGb} / ${currentHost.swapTotalGb} GB` : '--' }}
               </span>
             </div>
             <div class="h-1.5 rounded-full bg-slate-950 border border-slate-800 overflow-hidden">
               <div
                 class="bg-amber-400 h-full"
-                :style="{ width: `${(currentHost.swapUsedGb / currentHost.swapTotalGb) * 100}%` }"
+                :style="{ width: `${currentHost.swapTotalGb ? (currentHost.swapUsedGb! / currentHost.swapTotalGb) * 100 : 0}%` }"
               />
             </div>
           </div>
@@ -155,20 +155,20 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
               <HardDrive class="w-4 h-4 text-indigo-400" />
               <span>磁盘 I/O 与实时网络吞吐</span>
             </div>
-            <span class="font-mono text-xs text-indigo-300">根分区 / ({{ currentHost.diskUsedPercent }}%)</span>
+            <span class="font-mono text-xs text-indigo-300">根分区 / ({{ currentHost.diskUsedPercent !== undefined ? `${currentHost.diskUsedPercent}%` : '--' }})</span>
           </div>
 
           <div class="grid grid-cols-2 gap-2 text-xs font-mono">
             <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
               <div class="text-[10px] text-slate-400">网卡上行 (eth0 TX)</div>
               <div class="text-emerald-400 font-bold mt-0.5">
-                ↑ {{ (currentHost.netUpKbps / 1024).toFixed(2) }} MB/s
+                ↑ {{ currentHost.netUpKbps ? (currentHost.netUpKbps / 1024).toFixed(2) : '0.00' }} MB/s
               </div>
             </div>
             <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
               <div class="text-[10px] text-slate-400">网卡下行 (eth0 RX)</div>
               <div class="text-sky-400 font-bold mt-0.5">
-                ↓ {{ (currentHost.netDownKbps / 1024).toFixed(2) }} MB/s
+                ↓ {{ currentHost.netDownKbps ? (currentHost.netDownKbps / 1024).toFixed(2) : '0.00' }} MB/s
               </div>
             </div>
           </div>
