@@ -803,6 +803,8 @@ export interface HostMetricsResponse {
   netUpKbps: number
   netDownKbps: number
   uptime: string
+  os?: string
+  kernel?: string
   message?: string
 }
 
@@ -837,6 +839,8 @@ export async function fetchHostMetrics(hostId: string) {
       targetHost.netUpKbps = data.netUpKbps
       targetHost.netDownKbps = data.netDownKbps
       targetHost.uptime = data.uptime
+      if (data.os) targetHost.os = data.os
+      if (data.kernel) targetHost.kernel = data.kernel
       targetHost.status = 'online'
       targetHost.metricsStatus = 'synced'
       targetHost.lastMetricsUpdate = Date.now()

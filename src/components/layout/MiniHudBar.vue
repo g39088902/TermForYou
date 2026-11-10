@@ -17,6 +17,7 @@ import {
   Sparkles,
   RefreshCw,
   Activity,
+  Layers,
   X
 } from 'lucide-vue-next'
 
@@ -65,6 +66,16 @@ function formatSpeed(kbPerSec: number): string {
         :title="`系统内核: ${currentHost.kernel} | 运行时间: ${currentHost.uptime}`"
       >
         {{ currentHost.user }}@{{ currentHost.ip }}:{{ currentHost.port }}
+      </span>
+
+      <!-- 操作系统版本 -->
+      <span
+        class="flex items-center gap-1.5 text-[11px] font-mono px-2 py-0.5 rounded bg-slate-950/90 border border-slate-800/90 text-slate-300"
+        :title="`操作系统完整版本: ${currentHost.os}\n系统内核: ${currentHost.kernel}`"
+      >
+        <Layers class="w-3 h-3 text-cyan-400 shrink-0" />
+        <span class="text-slate-400 text-[10px]">OS</span>
+        <span class="text-slate-200 font-medium truncate max-w-[240px]">{{ currentHost.os }}</span>
       </span>
 
       <!-- 实时 CPU / 内存 / 负载指标块 (点击直达性能与进程中心) -->

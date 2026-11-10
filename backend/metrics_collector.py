@@ -54,6 +54,15 @@ try:
     with open("/proc/uptime") as f:
         uptime_sec = int(float(f.read().split()[0]))
 
+    os_name = "Linux"
+    if os.path.exists("/etc/os-release"):
+        with open("/etc/os-release") as f_os:
+            for l_os in f_os:
+                if l_os.startswith("PRETTY_NAME="):
+                    os_name = l_os.split("=")[1].strip().strip(chr(34)).strip(chr(39))
+                    break
+    kernel_ver = os.uname().release if hasattr(os, "uname") else ""
+
     print(json.dumps({
         "status": "ok",
         "load": load,
@@ -69,7 +78,9 @@ try:
         "cpu_cores": cpu_cores,
         "rx_bytes": rx_bytes,
         "tx_bytes": tx_bytes,
-        "uptime_sec": uptime_sec
+        "uptime_sec": uptime_sec,
+        "os": os_name,
+        "kernel": kernel_ver
     }))
 except Exception as e:
     print(json.dumps({"status": "error", "message": str(e)}))
@@ -281,6 +292,8 @@ class HostMetricsService:
                     "netUpKbps": net_up_kbps,
                     "netDownKbps": net_down_kbps,
                     "uptime": uptime_str,
+                    "os": raw_data.get("os", "Linux"),
+                    "kernel": raw_data.get("kernel", ""),
                 }
                 self._last_result[host_alias] = result
                 return result
