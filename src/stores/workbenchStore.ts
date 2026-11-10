@@ -737,6 +737,45 @@ export async function connectHost(hostId: string) {
 }
 
 // 从本地 Python 后端加载真实 ~/.ssh/config 主机列表 (按连接次数降序)
+/**
+ * 根据探测/认证真实结果，动态将模糊的“免密/密码认证”更名为“密码认证”或“默认密钥”
+ */
+export function updateHostAuthTags(host: ServerHost, authMethod?: string, hasPassword = false) {
+  if (authMethod) {
+    host.authMethod = authMethod as any
+  }
+  if (hasPassword) {
+    host.hasCustomPassword = true
+  }
+
+  // 1. 若在 ~/.ssh/config 明确指定了密钥路径，保持专属密钥标签
+  if (host.identityFiles && host.identityFiles.length > 0) {
+    host.tags = ['密钥认证', ...host.identityFiles.map(k => k.split('/').pop() || 'key')]
+    return
+  }
+
+  // 2. 未指定密钥时，根据真实探测结果动态更名
+  const isPassword =
+    host.authFailed ||
+    authMethod === 'password' ||
+    host.hasCustomPassword ||
+    host.authMethod === 'password'
+
+  if (isPassword) {
+    host.tags = ['密码认证']
+  } else if (
+    authMethod === 'default_key' ||
+    host.authMethod === 'default_key' ||
+    (host.powerStatus === 'online' && !host.authFailed)
+  ) {
+    // 目标在线且非密码认证，说明系统通过全局默认私钥或 ssh-agent 成功免密接通
+    host.tags = ['默认密钥']
+  } else {
+    // 离线或尚未探测时保留默认状态
+    host.tags = ['免密/密码认证']
+  }
+}
+
 export async function loadSshHostsFromBackend() {
   try {
     const res = await fetch('http://127.0.0.1:8000/api/v1/ssh/hosts')
@@ -751,6 +790,7 @@ export async function loadSshHostsFromBackend() {
         user: h.user,
         group: '~/.ssh/config 本地配置',
         status: 'unconnected',
+        identityFiles: h.identity_files,
         tags: h.identity_files.length > 0 ? ['密钥认证', ...h.identity_files.map(k => k.split('/').pop() || 'key')] : ['免密/密码认证'],
         connectionCount: h.connection_count ?? 0,
         lastConnectedAt: h.last_connected_at ?? undefined,
@@ -872,6 +912,7 @@ export interface ProbeResultItem {
   timestamp: number
   auth_failed?: boolean
   auth_message?: string
+  auth_method?: 'password' | 'default_key' | 'custom_key'
 }
 
 // 批量并发探测所有服务器开机状态
@@ -918,6 +959,7 @@ export async function probeAllHosts(silent = false) {
         host.lastProbedAt = probeRes.timestamp ? probeRes.timestamp * 1000 : Date.now()
 
         const m = metricsMap[host.id]
+        const authMethod = probeRes.auth_method || m?.auth_method
         const isAuthFailed = Boolean(
           probeRes.auth_failed || (m && (m.status === 'auth_failed' || m.auth_failed))
         )
@@ -930,6 +972,9 @@ export async function probeAllHosts(silent = false) {
         } else {
           host.authMessage = undefined
         }
+
+        // 动态根据探测/认证结果更新卡片标签 (将“免密/密码认证”更名为“密码认证”或“默认密钥”)
+        updateHostAuthTags(host, authMethod)
 
         if (probeRes.online && !isAuthFailed) {
           onlineCount++
@@ -1053,6 +1098,7 @@ export interface HostMetricsResponse {
   firewallEnabled?: boolean
   message?: string
   auth_failed?: boolean
+  auth_method?: 'password' | 'default_key' | 'custom_key'
 }
 
 let metricsTimer: ReturnType<typeof setInterval> | null = null
@@ -1201,6 +1247,10 @@ export async function probeHost(hostId: string) {
         host.authMessage = undefined
       }
 
+      const authMethod = probeRes.auth_method || probeRes.inspection?.auth_method
+      // 动态根据探测/认证结果更新卡片标签 (将“免密/密码认证”更名为“密码认证”或“默认密钥”)
+      updateHostAuthTags(host, authMethod)
+
       // 若后端已返回全页面深度探测数据
       if (!isAuthFailed && probeRes.inspection && (probeRes.inspection.status === 'ok' || probeRes.inspection.status === 'partial')) {
         const insp = probeRes.inspection
@@ -1283,6 +1333,8 @@ export async function updateHostPassword(hostId: string, password: string): Prom
     host.authMessage = undefined
     host.powerStatus = 'online'
     host.status = 'online'
+    host.hasCustomPassword = true
+    updateHostAuthTags(host, 'password', true)
     showToast(`密码验证成功！已连通服务器「${host.name}」并同步全页面数据`)
 
     // 重新探测全量数据

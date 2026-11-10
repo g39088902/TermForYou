@@ -469,11 +469,14 @@ class HostMetricsService:
         self._last_result: Dict[str, Dict[str, Any]] = {}
         # 记录主机认证密码缓存 (进程内存)
         self._credentials: Dict[str, str] = {}
+        # 记录主机认证方式缓存 (host_alias -> "password" | "default_key" | "custom_key")
+        self._auth_methods: Dict[str, str] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
 
     def set_credential(self, host_alias: str, password: Optional[str]):
         if password is not None:
             self._credentials[host_alias] = password
+            self._auth_methods[host_alias] = "password"
             conn = self._connections.pop(host_alias, None)
             if conn and not conn.is_closed():
                 try:
@@ -522,15 +525,23 @@ class HostMetricsService:
         try:
             new_conn = await asyncssh.connect(**conn_kwargs)
             self._connections[host_alias] = new_conn
+            if client_keys:
+                self._auth_methods[host_alias] = "custom_key"
+            elif pwd:
+                self._auth_methods[host_alias] = "password"
+            else:
+                self._auth_methods[host_alias] = "default_key"
             return new_conn, None, None
         except asyncssh.PermissionDenied as e:
             self._connections.pop(host_alias, None)
+            self._auth_methods[host_alias] = "password" if not client_keys else "custom_key"
             return None, "auth_failed", f"身份认证被拒绝 (Permission denied): {str(e)}"
         except Exception as e:
             # 连接失败清理缓存
             self._connections.pop(host_alias, None)
             err_str = str(e).lower()
             if "permission denied" in err_str or "authentication failed" in err_str or "password auth" in err_str:
+                self._auth_methods[host_alias] = "password" if not client_keys else "custom_key"
                 return None, "auth_failed", f"身份认证失败 (密码错误或缺少私钥): {str(e)}"
             return None, "connection_error", str(e)
 
@@ -549,6 +560,7 @@ class HostMetricsService:
                     return {
                         "status": "auth_failed",
                         "auth_failed": True,
+                        "auth_method": self._auth_methods.get(host_alias, "password"),
                         "error_type": "auth_failed",
                         "message": err_msg or "密码不对或未完成认证 (Permission denied)",
                         "host_alias": host_alias,
@@ -647,6 +659,7 @@ class HostMetricsService:
                     "kernel": raw_data.get("kernel", ""),
                     "firewallBackend": raw_data.get("firewall_backend", "iptables"),
                     "firewallEnabled": bool(raw_data.get("firewall_enabled", False)),
+                    "auth_method": self._auth_methods.get(host_alias),
                 }
                 self._last_result[host_alias] = result
                 return result
@@ -672,6 +685,7 @@ class HostMetricsService:
                 return {
                     "status": "auth_failed",
                     "auth_failed": True,
+                    "auth_method": self._auth_methods.get(host_alias, "password"),
                     "error_type": "auth_failed",
                     "message": err_msg or "密码不对或身份认证被拒绝 (Permission denied)",
                     "host_alias": host_alias,
@@ -679,6 +693,7 @@ class HostMetricsService:
                     "metrics": {
                         "status": "auth_failed",
                         "auth_failed": True,
+                        "auth_method": self._auth_methods.get(host_alias, "password"),
                         "message": err_msg or "密码不对或身份认证被拒绝"
                     }
                 }
@@ -702,6 +717,7 @@ class HostMetricsService:
                 return {
                     "status": "ok",
                     "host_alias": host_alias,
+                    "auth_method": self._auth_methods.get(host_alias),
                     "timestamp": now,
                     "metrics": metrics,
                     "processes": inspect_data.get("processes", []),
@@ -717,6 +733,7 @@ class HostMetricsService:
         return {
             "status": "partial",
             "host_alias": host_alias,
+            "auth_method": self._auth_methods.get(host_alias),
             "timestamp": now,
             "metrics": metrics,
             "processes": [],

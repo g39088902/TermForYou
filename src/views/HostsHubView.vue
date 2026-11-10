@@ -78,6 +78,22 @@ function formatLastConnected(ts?: number) {
   return `${Math.floor(diffSec / 86400)} 天前`
 }
 
+function getTagClass(tag: string, host: ServerHost) {
+  if (tag === '默认密钥') {
+    return 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-medium'
+  }
+  if (tag === '密码认证') {
+    if (host.authFailed) {
+      return 'bg-amber-500/15 text-amber-800 dark:text-amber-200 border border-amber-500/40 font-medium'
+    }
+    return 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border border-indigo-500/30 font-medium'
+  }
+  if (tag === '免密/密码认证') {
+    return 'bg-slate-500/10 text-slate-700 dark:text-slate-400 border border-slate-500/20 font-medium'
+  }
+  return 'bg-cyan-500/15 text-cyan-800 dark:text-cyan-300 border border-cyan-500/30 font-medium'
+}
+
 async function handleDeleteHost(hostId: string, hostName: string) {
   if (
     !confirm(
@@ -380,7 +396,10 @@ onMounted(() => {
             <span
               v-for="tag in host.tags"
               :key="tag"
-              class="px-2 py-0.5 text-[10px] rounded-full bg-cyan-500/10 text-cyan-300 border border-cyan-500/20"
+              :class="[
+                'px-2 py-0.5 text-[10px] rounded-full inline-flex items-center gap-1 transition-colors',
+                getTagClass(tag, host)
+              ]"
             >
               {{ tag }}
             </span>

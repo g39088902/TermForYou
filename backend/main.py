@@ -127,6 +127,7 @@ async def probe_host_endpoint(host_alias: str):
         **probe_res,
         "auth_failed": auth_failed,
         "auth_message": auth_message,
+        "auth_method": inspection_data.get("auth_method") if inspection_data else metrics_service._auth_methods.get(host_alias),
         "inspection": inspection_data
     }
 
@@ -150,6 +151,8 @@ async def probe_all_hosts_endpoint():
                 if alias in results:
                     results[alias]["auth_failed"] = True
                     results[alias]["auth_message"] = m.get("message", "已开机，但密码不对或未完成认证")
+            if m and m.get("auth_method") and alias in results:
+                results[alias]["auth_method"] = m.get("auth_method")
 
     return {
         "status": "ok",
@@ -173,6 +176,7 @@ async def set_host_credential_endpoint(host_alias: str, payload: SetCredentialPa
         "host_alias": host_alias,
         "auth_failed": auth_failed,
         "auth_message": inspection.get("message") if auth_failed else None,
+        "auth_method": inspection.get("auth_method", "password"),
         "inspection": inspection
     }
 

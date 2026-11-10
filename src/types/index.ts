@@ -21,6 +21,9 @@ export interface ServerHost {
   uptime?: string
   status: 'online' | 'warning' | 'offline' | 'unconnected'
   tags: string[]
+  identityFiles?: string[]
+  authMethod?: 'password' | 'default_key' | 'custom_key'
+  hasCustomPassword?: boolean
   cpuUsage?: number
   cpuCores?: number[]
   loadAvg?: [number, number, number]
