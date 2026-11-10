@@ -108,34 +108,34 @@ function saveFirewallRuleToSnippets() {
     title: `防火墙放行端口 ${newRule.value.port} (${newRule.value.comment})`,
     category: '网络与端口排查',
     commandTemplate: underlyingCliPreview.value,
-    description: '由 P8 防火墙可视化规则构建器一键保存',
+    description: '防火墙放行规则',
     variables: [],
     scope: currentHost.value.id,
     usageCount: 1,
     source: 'gui-saved'
   })
-  showToast('已将该防火墙 CLI 命令加入 P4 常用命令库！')
+  showToast('已将该命令保存至常用命令库！')
 }
 </script>
 
 <template>
   <div class="p-5 space-y-5 overflow-y-auto h-full">
-    <!-- 1. 核心亮点：「实际监听端口 vs 防火墙放行状态」全景对照矩阵 -->
+    <!-- 1. 「实际监听端口 vs 防火墙放行状态」对照矩阵 -->
     <div class="rounded-xl bg-slate-900/90 border border-slate-800 p-4 space-y-3">
       <div class="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 class="text-sm font-bold text-slate-100 flex items-center gap-2">
             <Shield class="w-4 h-4 text-cyan-400" />
-            <span>P8 实际监听端口 vs 防火墙放行状态全景对照矩阵 (后端: {{ currentHost.firewallBackend.toUpperCase() }})</span>
+            <span>端口监听与防火墙对照 ({{ currentHost.firewallBackend.toUpperCase() }})</span>
           </h1>
           <p class="text-xs text-slate-400 mt-0.5">
-            自动比对 <code>ss -tulnp</code> 实时监听端口与防火墙规则表，直观揪出「已启动服务但被防火墙拦截」的排障盲区。
+            实时比对本地服务监听端口与防火墙规则放行状态。
           </p>
         </div>
 
         <div class="flex items-center gap-2 px-3 py-1 rounded-lg bg-emerald-950/60 border border-emerald-700/50 text-xs text-emerald-300">
           <Lock class="w-3.5 h-3.5" />
-          <span>防呆防锁死保护已开启：当前 SSH 端口 (:{{ currentHost.port }}) 已强制锁定放行</span>
+          <span>保护规则：当前 SSH 端口 (:{{ currentHost.port }}) 保持锁定放行</span>
         </div>
       </div>
 

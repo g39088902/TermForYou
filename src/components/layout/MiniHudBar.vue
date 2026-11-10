@@ -32,7 +32,7 @@ import {
           })
         "
         class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer"
-        title="点击跳转到 P2 性能与进程监控中心"
+        title="点击查看性能与进程监控"
       >
         <Cpu class="w-3.5 h-3.5 text-cyan-400" />
         <span class="text-slate-300">CPU</span>

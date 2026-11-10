@@ -46,7 +46,7 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
     if not host_info:
         await websocket.send_text(json.dumps({
             "action": "stderr",
-            "payload": f"\r\n\x1b[31m[TermForYou] 未在 ~/.ssh/config 中找到主机: {host_alias}\x1b[0m\r\n"
+            "payload": f"\r\n\x1b[31m未在 ~/.ssh/config 中找到主机: {host_alias}\x1b[0m\r\n"
         }))
         await websocket.close()
         return
@@ -91,14 +91,14 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
 
     await websocket.send_text(json.dumps({
         "action": "stdout",
-        "payload": f"\x1b[36m[TermForYou] 正在通过 SSH 直连 {host_info.user}@{host_info.hostname}:{host_info.port}...\x1b[0m\r\n"
+        "payload": f"\x1b[36m正在连接 {host_info.user}@{host_info.hostname}:{host_info.port}...\x1b[0m\r\n"
     }))
 
     try:
         async with asyncssh.connect(**conn_kwargs) as conn:
             await websocket.send_text(json.dumps({
                 "action": "stdout",
-                "payload": f"\x1b[32m[TermForYou] SSH 会话连接成功！PTY 已分配 ({cols}x{rows})\x1b[0m\r\n\r\n"
+                "payload": f"\x1b[32mSSH 会话连接成功 (PTY {cols}x{rows})\x1b[0m\r\n\r\n"
             }))
 
             # 创建 PTY 伪终端交互式会话

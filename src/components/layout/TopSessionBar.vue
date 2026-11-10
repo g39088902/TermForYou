@@ -48,7 +48,7 @@ function closeHostTab(hostId: string, e: MouseEvent) {
             ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
             : 'bg-slate-900 text-slate-300 hover:bg-slate-800 border border-slate-800'
         ]"
-        title="打开主机连接池 (P0)"
+        title="打开主机连接池"
       >
         <Server class="w-3.5 h-3.5 text-cyan-400" />
         <span>主机池</span>
@@ -155,7 +155,7 @@ function closeHostTab(hostId: string, e: MouseEvent) {
         ]"
       >
         <ExternalLink class="w-3.5 h-3.5" />
-        <span>独立日志盯盘窗</span>
+        <span>独立日志窗</span>
       </button>
 
       <button
@@ -164,7 +164,7 @@ function closeHostTab(hostId: string, e: MouseEvent) {
         class="flex items-center gap-2 px-3 py-1 rounded-md bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-xs text-slate-300 transition cursor-pointer"
       >
         <Search class="w-3.5 h-3.5 text-cyan-400" />
-        <span>全局命令与跳转...</span>
+        <span>搜索或执行命令...</span>
         <kbd class="px-1.5 py-0.5 text-[10px] font-mono bg-slate-800 text-slate-400 rounded border border-slate-700">
           ⌘K
         </kbd>

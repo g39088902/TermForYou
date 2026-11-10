@@ -102,7 +102,7 @@ function createNewSystemdService() {
       <div class="p-3.5 border-b border-slate-800 flex items-center justify-between">
         <div class="flex items-center gap-2 text-xs font-bold text-slate-100">
           <Cog class="w-4 h-4 text-indigo-400" />
-          <span>P6 Systemd 系统服务列表</span>
+          <span>Systemd 系统服务</span>
         </div>
 
         <div class="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px]">

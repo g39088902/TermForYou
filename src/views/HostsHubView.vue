@@ -98,10 +98,10 @@ function quickAddHost() {
       <div>
         <h1 class="text-lg font-bold text-slate-100 flex items-center gap-2">
           <Server class="w-5 h-5 text-cyan-400" />
-          <span>P0 主机连接池 (SSH 免 Agent 直连架构)</span>
+          <span>主机连接池</span>
         </h1>
         <p class="text-xs text-slate-400 mt-1">
-          双击或点击「进入工作台」即可建立 SSH + SFTP 多路复用通道，自动探测远端 Systemd、Crontab、Docker 与防火墙状态。
+          管理与连接远程服务器，支持交互终端、文件传输与系统服务状态监控。
         </p>
       </div>
 
@@ -246,24 +246,6 @@ function quickAddHost() {
           </button>
         </div>
       </div>
-    </div>
-
-    <!-- 底部：SSH 密钥与跳板机隧道说明 -->
-    <div class="rounded-xl bg-slate-900/60 border border-slate-800 p-4 flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <div class="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
-          <KeyRound class="w-5 h-5" />
-        </div>
-        <div>
-          <h3 class="text-xs font-semibold text-slate-100">本地 SSH 密钥保险箱与 ProxyJump 跳板机支持</h3>
-          <p class="text-[11px] text-slate-400 mt-0.5">
-            支持 Ed25519 / RSA 私钥、系统 SSH Agent 转发以及多级 Bastion 跳板机隧道连接，所有凭证使用本地系统 Keychain 加密存储。
-          </p>
-        </div>
-      </div>
-      <span class="text-xs font-mono text-emerald-400 bg-emerald-950/50 border border-emerald-700/40 px-2.5 py-1 rounded">
-        Keychain 已就绪 (3 把密钥)
-      </span>
     </div>
   </div>
 </template>

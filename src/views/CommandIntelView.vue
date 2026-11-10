@@ -65,10 +65,10 @@ function runLlmSemanticPolish(cluster: ExtractedCommandCluster) {
       <div>
         <h1 class="text-base font-bold text-slate-100 flex items-center gap-2">
           <Sparkles class="w-5 h-5 text-cyan-400" />
-          <span>P4 命令资产中心 (历史命令 AST 自动提炼 + 参数化常用命令管理)</span>
+          <span>命令提炼与常用库</span>
         </h1>
         <p class="text-xs text-slate-400 mt-1">
-          自动扫描远端 <code>.bash_history</code> / <code>.zsh_history</code>，通过语法骨架指纹聚类相似命令，自动推断动态槽位 <code>&#123;&#123;var:default&#125;&#125;</code>。
+          分析历史会话高频命令，支持参数化模版提炼与快捷复用。
         </p>
       </div>
 
@@ -84,7 +84,7 @@ function runLlmSemanticPolish(cluster: ExtractedCommandCluster) {
           ]"
         >
           <Wand2 class="w-3.5 h-3.5" />
-          <span>历史命令统计与自动提炼 ({{ extractedClusters.length }})</span>
+          <span>历史命令统计与提炼 ({{ extractedClusters.length }})</span>
         </button>
 
         <button
@@ -112,7 +112,7 @@ function runLlmSemanticPolish(cluster: ExtractedCommandCluster) {
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 text-xs font-bold text-slate-100">
               <BarChart3 class="w-4 h-4 text-cyan-400" />
-              <span>历史高频命令前缀分布 (已自动过滤 ls/cd/pwd 等低价值噪音)</span>
+              <span>高频命令前缀分布</span>
             </div>
             <span class="text-[11px] font-mono text-slate-400">样本总数: {{ store.rawHistoryLines.length }} 条</span>
           </div>
@@ -137,29 +137,26 @@ function runLlmSemanticPolish(cluster: ExtractedCommandCluster) {
           </div>
         </div>
 
-        <!-- 实时 AST 聚类沙箱：支持用户现场粘贴任意历史命令验证提炼算法 -->
+        <!-- 自定义命令输入分析 -->
         <div class="rounded-xl bg-slate-900/90 border border-cyan-500/30 p-4 flex flex-col justify-between space-y-3">
           <div class="space-y-1.5">
             <div class="flex items-center justify-between">
               <span class="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
                 <Wand2 class="w-4 h-4" />
-                <span>实时测试 AST 命令提炼引擎 (输入多条相似历史命令)</span>
-              </span>
-              <span class="text-[10px] px-2 py-0.5 rounded bg-cyan-500/15 text-cyan-300 font-mono">
-                Zero-Dependency Lexer
+                <span>自定义命令输入分析</span>
               </span>
             </div>
             <textarea
               v-model="customHistoryInput"
               rows="3"
-              aria-label="测试历史命令输入区"
+              aria-label="命令输入区"
               class="w-full rounded-lg bg-slate-950 border border-slate-700 p-2.5 font-mono text-xs text-slate-200 focus:border-cyan-400 focus:outline-none"
             />
           </div>
 
           <div class="flex items-center justify-between">
             <span class="text-[11px] text-slate-400">
-              点击右侧按钮将上方命令注入历史池，下方将立即生成对应的参数化模板卡片
+              输入多行相似命令，点击右侧生成模版
             </span>
             <button
               type="button"

@@ -89,10 +89,10 @@ function addCronTask() {
         <div>
           <h1 class="text-sm font-bold text-slate-100 flex items-center gap-2">
             <CalendarClock class="w-4 h-4 text-cyan-400" />
-            <span>P7 计划任务可视化构建器 (Crontab & Systemd Timers 统一纳管)</span>
+            <span>计划任务管理</span>
           </h1>
           <p class="text-xs text-slate-400 mt-0.5">
-            内置 Cron 自然语言翻译器与未来执行时间预测，支持点击脚本路径直接呼出右侧代码编辑器修改 <code>.sh</code> 脚本。
+            Crontab 表达式构建与执行时间预测。
           </p>
         </div>
 

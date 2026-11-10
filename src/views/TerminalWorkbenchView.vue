@@ -20,52 +20,16 @@ import {
   Columns2,
   AlertTriangle,
   ArrowUpRight,
-  CheckCircle2,
-  Send,
-  Radio
+  CheckCircle2
 } from 'lucide-vue-next'
 
-const useRealXterm = ref(true)
-const cmdInput = ref('')
 const splitPaneMode = ref(false)
 const highRiskBlockedCmd = ref('')
-
-const HIGH_RISK_PATTERNS = [/rm\s+-rf\s+\//, /mkfs/, /iptables\s+-F/, /dd\s+if=/]
-
-// 幽灵文本内联自动补全提示
-const ghostSuggestion = computed(() => {
-  const val = cmdInput.value.trim()
-  if (!val || val.length < 2) return ''
-  const matchFromHistory = store.rawHistoryLines.find(
-    (line) => line.startsWith(val) && line !== val
-  )
-  return matchFromHistory ?? ''
-})
-
-function acceptGhostSuggestion() {
-  if (ghostSuggestion.value) {
-    cmdInput.value = ghostSuggestion.value
-  }
-}
-
-function submitCommand() {
-  const raw = cmdInput.value.trim()
-  if (!raw) return
-
-  if (HIGH_RISK_PATTERNS.some((reg) => reg.test(raw))) {
-    highRiskBlockedCmd.value = raw
-    return
-  }
-
-  executeTerminalCommand(raw)
-  cmdInput.value = ''
-}
 
 function forceExecuteHighRisk() {
   if (!highRiskBlockedCmd.value) return
   executeTerminalCommand(highRiskBlockedCmd.value)
   highRiskBlockedCmd.value = ''
-  cmdInput.value = ''
 }
 </script>
 
@@ -79,48 +43,27 @@ function forceExecuteHighRisk() {
         <div class="h-9 px-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs shrink-0">
           <div class="flex items-center gap-2">
             <Terminal class="w-3.5 h-3.5 text-cyan-400" />
-            <span class="font-semibold text-slate-100">SSH 交互终端 ({{ currentHost.name }})</span>
+            <span class="font-semibold text-slate-100">SSH 终端 ({{ currentHost.name }})</span>
             <span class="px-1.5 py-0.5 rounded bg-slate-800 text-amber-300 font-mono text-[11px]">
               {{ currentHost.ip }}:{{ currentHost.port }}
             </span>
             <span
-              v-if="useRealXterm"
-              class="flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-mono text-[10px] border border-emerald-500/30"
+              class="flex items-center gap-1.5 px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-mono text-[10px] border border-emerald-500/30"
             >
-              <Radio class="w-3 h-3 text-emerald-400 animate-pulse" />
-              <span>xterm.js + Python 直连</span>
+              <span class="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              <span>已连接</span>
             </span>
           </div>
 
           <div class="flex items-center gap-2">
             <button
               type="button"
-              @click="useRealXterm = !useRealXterm"
-              :class="[
-                'px-2 py-0.5 rounded text-[11px] border cursor-pointer transition',
-                useRealXterm
-                  ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                  : 'bg-slate-800 text-slate-400 border-slate-700'
-              ]"
-            >
-              {{ useRealXterm ? '切换回 Mock 演示模式' : '启用真实 xterm 直连' }}
-            </button>
-            <button
-              type="button"
-              @click="cmdInput = 'rm -rf /var/log/nginx/*'"
-              class="px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[11px] cursor-pointer"
-              title="点击演示高危命令二次确认拦截器"
-            >
-              测试高危命令拦截
-            </button>
-            <button
-              type="button"
               @click="splitPaneMode = !splitPaneMode"
               :class="[
-                'flex items-center gap-1 px-2 py-0.5 rounded text-[11px] border cursor-pointer',
+                'flex items-center gap-1 px-2.5 py-1 rounded text-[11px] border cursor-pointer transition',
                 splitPaneMode
                   ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-                  : 'bg-slate-800 text-slate-300 border-slate-700'
+                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
               ]"
             >
               <Columns2 class="w-3 h-3" />
@@ -159,117 +102,35 @@ function forceExecuteHighRisk() {
           </div>
         </div>
 
-        <!-- 终端输出内容区：真实 xterm 直连 或 Mock 演示 -->
+        <!-- 终端输出内容区 -->
         <div class="flex-1 flex min-h-0 overflow-hidden relative">
-          <!-- 真实 xterm 直连组件 -->
+          <!-- 主终端 -->
           <RealXtermTerminal
-            v-if="useRealXterm"
             :host-alias="currentHost.id"
-            class="w-full h-full"
+            class="flex-1 h-full min-w-0"
           />
 
-          <!-- 原有 Mock 演示列表 -->
-          <div v-else class="flex-1 flex flex-col min-h-0 overflow-hidden">
-            <div class="flex-1 flex min-h-0 overflow-hidden">
-              <div class="flex-1 overflow-y-auto p-3.5 font-mono text-xs space-y-3">
-                <div class="text-slate-500 text-[11px]">
-                  Welcome to {{ currentHost.os }} ({{ currentHost.kernel }}) — Mock 演示终端.
-                </div>
-
-                <div
-                  v-for="entry in store.terminalHistory"
-                  :key="entry.id"
-                  class="rounded-lg bg-slate-900/60 border border-slate-800/80 p-2.5 space-y-1.5"
-                >
-                  <div class="flex items-center justify-between text-[11px]">
-                    <div class="flex items-center gap-1.5">
-                      <span class="text-emerald-400 font-semibold">{{ currentHost.user }}@{{ currentHost.name }}</span>
-                      <span class="text-slate-500">:</span>
-                      <span class="text-amber-300">{{ entry.cwd }}</span>
-                      <span class="text-slate-400">#</span>
-                      <span class="text-slate-100 font-bold ml-1">{{ entry.command }}</span>
-                    </div>
-                    <div class="flex items-center gap-2 text-slate-500">
-                      <span class="text-emerald-400">Exit {{ entry.exitCode }}</span>
-                      <span>{{ entry.durationMs }}ms</span>
-                      <span>{{ entry.timestamp }}</span>
-                    </div>
-                  </div>
-                  <pre class="text-slate-300 whitespace-pre-wrap text-[11px] leading-relaxed pl-2 border-l-2 border-slate-700">{{ entry.output }}</pre>
-                </div>
-              </div>
-
-              <!-- 分屏终端 #2 -->
-              <div
-                v-if="splitPaneMode"
-                class="w-1/2 border-l border-slate-800 bg-slate-950 p-3.5 font-mono text-xs flex flex-col justify-between"
-              >
-                <div class="space-y-2">
-                  <div class="text-[11px] text-cyan-400 font-semibold flex items-center justify-between border-b border-slate-800 pb-1.5">
-                    <span>SSH 分屏终端 #2 (实时监控视图)</span>
-                    <span class="text-slate-500">广播同步已就绪</span>
-                  </div>
-                  <pre class="text-[11px] text-slate-300 leading-relaxed">
-$ watch -n 2 "ss -s && free -h"
-Total: 418 (kernel 912)
-TCP:   94 (estab 62, closed 18, orphaned 0, timewait 18)
-
-               total        used        free      shared  buff/cache   available
-Mem:           15Gi       9.4Gi       1.2Gi       142Mi       5.1Gi       5.9Gi
-Swap:         4.0Gi       410Mi       3.6Gi</pre>
-                </div>
-                <div class="text-[11px] text-slate-500">
-                  提示：开启广播模式后，主输入框指令将同时发送至两个分屏终端。
-                </div>
-              </div>
-            </div>
-
-            <!-- 终端底部输入框（仅 Mock 演示模式使用） -->
-            <form
-              @submit.prevent="submitCommand"
-              class="h-11 bg-slate-900 border-t border-slate-800 px-3 flex items-center gap-2 relative shrink-0"
-            >
-              <span class="font-mono text-xs text-emerald-400 shrink-0">
-                {{ currentHost.user }}@{{ currentHost.name }}:{{ currentHost.currentCwd }}#
-              </span>
-
-              <div class="relative flex-1 flex items-center">
-                <input
-                  v-model="cmdInput"
-                  @keydown.tab.prevent="acceptGhostSuggestion"
-                  type="text"
-                  placeholder="输入命令 (如 cd /var/log 或 docker logs...)，按 Tab 采纳历史补全"
-                  class="w-full bg-transparent font-mono text-xs text-slate-100 focus:outline-none z-10"
-                />
-                <span
-                  v-if="ghostSuggestion"
-                  class="absolute left-0 font-mono text-xs text-slate-600 pointer-events-none select-none"
-                >
-                  {{ ghostSuggestion }}
-                  <span class="ml-2 px-1 py-0.5 text-[10px] rounded bg-slate-800 text-cyan-400">Tab 补全</span>
-                </span>
-              </div>
-
-              <button
-                type="submit"
-                class="flex items-center gap-1 px-3 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-medium cursor-pointer"
-              >
-                <Send class="w-3.5 h-3.5" />
-                <span>发送</span>
-              </button>
-            </form>
+          <!-- 分屏终端 #2 -->
+          <div
+            v-if="splitPaneMode"
+            class="w-1/2 border-l border-slate-800 h-full flex flex-col min-w-0"
+          >
+            <RealXtermTerminal
+              :host-alias="currentHost.id"
+              class="w-full h-full"
+            />
           </div>
         </div>
       </div>
 
-      <!-- 右上：常用命令与 AST 历史自动提炼侧边栏 -->
+      <!-- 右上：常用命令与历史提炼侧边栏 -->
       <div class="w-80 bg-slate-900/70 flex flex-col shrink-0">
         <!-- 自动提炼实时提醒卡 -->
         <div class="p-3 border-b border-slate-800 bg-gradient-to-br from-cyan-950/50 to-slate-900">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-1.5 text-xs font-bold text-cyan-300">
               <Sparkles class="w-4 h-4 text-cyan-400" />
-              <span>AST 历史命令自动提炼 ({{ extractedClusters.length }})</span>
+              <span>历史命令提炼 ({{ extractedClusters.length }})</span>
             </div>
             <button
               type="button"
@@ -342,7 +203,7 @@ Swap:         4.0Gi       410Mi       3.6Gi</pre>
           <span class="font-semibold text-slate-200">CWD 同步文件工作区：</span>
           <span class="font-mono text-amber-300">{{ currentHost.currentCwd }}</span>
           <span class="text-[11px] text-slate-500">
-            (在上方终端执行 <code>cd /path</code> 自动刷新此目录，点击文件直接呼出内置编辑器)
+            (跟随终端当前目录，点击文件可直接编辑)
           </span>
         </div>
 
@@ -358,7 +219,7 @@ Swap:         4.0Gi       410Mi       3.6Gi</pre>
           "
           class="text-[11px] text-cyan-400 hover:underline flex items-center gap-1 cursor-pointer"
         >
-          <span>切换全屏文件管理 (P3)</span>
+          <span>切换全屏文件管理</span>
           <ArrowUpRight class="w-3 h-3" />
         </button>
       </div>

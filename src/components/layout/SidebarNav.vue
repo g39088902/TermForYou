@@ -35,7 +35,7 @@ const navItems = computed(() => [
     label: '终端工作台',
     shortCode: 'P1',
     icon: TerminalSquare,
-    badge: '核心'
+    badge: ''
   },
   {
     id: 'P4_COMMANDS' as PageId,
@@ -101,19 +101,15 @@ const navItems = computed(() => [
       <div class="p-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/30 text-cyan-400">
         <TerminalSquare class="w-4 h-4" />
       </div>
-      <div class="flex flex-col min-w-0">
-        <div class="flex items-center gap-1.5">
-          <span class="font-bold text-xs tracking-tight text-slate-100">TermForYou</span>
-          <span class="px-1 py-0.2 text-[9px] font-mono rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">v1.0</span>
-        </div>
-        <span class="text-[10px] text-slate-500 truncate">以终端为中心·敏捷运维</span>
+      <div class="flex items-center min-w-0">
+        <span class="font-bold text-sm tracking-tight text-slate-100">TermForYou</span>
       </div>
     </div>
 
     <!-- 中间：主功能模块导航 (自适应平滑滚动) -->
     <nav class="flex-1 overflow-y-auto p-2 space-y-1" aria-label="主功能模块导航">
       <div class="px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
-        功能视图导航 (P0 - P8)
+        功能导航
       </div>
 
       <button
@@ -154,18 +150,5 @@ const navItems = computed(() => [
         </span>
       </button>
     </nav>
-
-    <!-- 底部：架构安全与直连状态说明小卡片 -->
-    <div class="p-2 border-t border-slate-800/80 shrink-0">
-      <div class="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800/80 text-[11px] text-slate-400 space-y-1.5">
-        <div class="flex items-center justify-between text-slate-200 font-medium">
-          <span>SSH 凭据零存储</span>
-          <span class="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
-        </div>
-        <p class="leading-relaxed text-slate-400 text-[10px]">
-          读取本地 ~/.ssh/config，GUI 动作实时映射底层命令。
-        </p>
-      </div>
-    </div>
   </aside>
 </template>

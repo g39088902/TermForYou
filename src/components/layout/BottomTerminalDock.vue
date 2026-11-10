@@ -23,13 +23,10 @@ function handleSend() {
       <div class="flex items-center gap-2">
         <Terminal class="w-3.5 h-3.5 text-cyan-400" />
         <span class="font-medium text-slate-200">
-          随行 SSH 终端会话 ({{ currentHost.user }}@{{ currentHost.ip }})
+          随行终端 ({{ currentHost.user }}@{{ currentHost.ip }})
         </span>
         <span class="text-[11px] font-mono text-amber-300 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
           {{ currentHost.currentCwd }}
-        </span>
-        <span class="text-[11px] text-slate-400">
-          切换页面不中断连接 · 支持直接注入可视化生成的命令
         </span>
       </div>
 
@@ -40,7 +37,7 @@ function handleSend() {
           class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] cursor-pointer"
         >
           <Maximize2 class="w-3 h-3" />
-          <span>切回完整工作台 (P1)</span>
+          <span>切回终端工作台</span>
         </button>
         <button
           type="button"

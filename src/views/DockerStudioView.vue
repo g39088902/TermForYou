@@ -66,10 +66,10 @@ function saveDockerRunAsSnippet() {
         <div>
           <h1 id="docker-table-heading" class="text-sm font-bold text-slate-100 flex items-center gap-2">
             <Container class="w-4 h-4 text-sky-400" />
-            <span>P5 Docker 容器与 Compose 编排中心</span>
+            <span>Docker 容器与编排</span>
           </h1>
           <p class="text-xs text-slate-400 mt-0.5">
-            支持一键进入容器交互式 Shell (<code>docker exec -it</code>)、点击存储卷直达文件管理器、点击映射端口联动防火墙。
+            容器实例运行状态、资源占用与端口映射管理。
           </p>
         </div>
 

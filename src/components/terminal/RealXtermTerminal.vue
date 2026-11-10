@@ -126,7 +126,7 @@ function connectTerminal(password?: string) {
 
   if (term) {
     term.reset()
-    term.writeln(`\x1b[36m[TermForYou] 正在初始化与本地 Python 后端的终端会话通道...\x1b[0m`)
+    term.writeln(`\x1b[36m正在建立终端会话通道...\x1b[0m`)
   }
 
   const wsUrl = `ws://127.0.0.1:8000/ws/terminal/${encodeURIComponent(props.hostAlias)}`
@@ -176,13 +176,13 @@ function connectTerminal(password?: string) {
   ws.onerror = () => {
     isConnecting.value = false
     isConnected.value = false
-    term?.writeln('\r\n\x1b[31m[TermForYou] WebSocket 通信异常，请确认 Python 后端服务运行在 http://127.0.0.1:8000\x1b[0m\r\n')
+    term?.writeln('\r\n\x1b[31m终端服务通信异常，请确认后台服务正常运行 (http://127.0.0.1:8000)\x1b[0m\r\n')
   }
 
   ws.onclose = () => {
     isConnecting.value = false
     isConnected.value = false
-    term?.writeln('\r\n\x1b[33m[TermForYou] SSH 会话已断开。\x1b[0m\r\n')
+    term?.writeln('\r\n\x1b[33mSSH 会话已断开。\x1b[0m\r\n')
   }
 }
 
@@ -303,7 +303,6 @@ watch(
           ]"
         />
         <span class="font-mono text-slate-300">{{ props.hostAlias }}</span>
-        <span class="text-[11px] text-slate-500">· 原生 xterm.js + Python asyncssh PTY</span>
       </div>
 
       <button
@@ -320,7 +319,7 @@ watch(
     <!-- xterm 容器 -->
     <div ref="terminalEl" class="flex-1 w-full h-full p-2 bg-slate-950 overflow-hidden" />
 
-    <!-- 临时密码交互输入弹窗 (In-Memory 纯临时会话，绝不落地磁盘) -->
+    <!-- 临时密码交互输入弹窗 -->
     <div
       v-if="needPassword"
       class="absolute inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-20"
@@ -328,12 +327,12 @@ watch(
       <div class="w-full max-w-sm rounded-xl bg-slate-900 border border-slate-800 p-5 shadow-2xl space-y-4">
         <div class="flex items-center gap-2.5 text-amber-400">
           <KeyRound class="w-5 h-5 shrink-0" />
-          <h3 class="text-sm font-bold text-slate-100">输入 SSH 会话临时密码</h3>
+          <h3 class="text-sm font-bold text-slate-100">输入 SSH 会话密码</h3>
         </div>
 
         <p class="text-xs text-slate-400 leading-relaxed">
           目标主机 <span class="font-mono text-cyan-300 font-semibold">{{ props.hostAlias }}</span> 未配置免密私钥。
-          密码仅在当前内存会话握手时使用，<span class="text-emerald-400 font-medium">绝不落地写入任何存储或数据库</span>。
+          密码仅在当前会话握手时使用，不会保存到磁盘。
         </p>
 
         <form @submit.prevent="submitPassword" class="space-y-3">
