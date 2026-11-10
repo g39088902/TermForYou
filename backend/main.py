@@ -8,6 +8,7 @@ import asyncssh
 
 from models import SshHostInfo, TerminalAuthPayload
 from ssh_config_parser import parse_ssh_config, find_host_by_alias, get_ssh_config_path
+from metrics_collector import metrics_service
 
 app = FastAPI(title="TermForYou SSH Backend", version="1.0.0")
 
@@ -33,6 +34,13 @@ async def get_config_info():
         "path": path,
         "exists": os.path.exists(path)
     }
+
+@app.get("/api/v1/ssh/metrics/{host_alias}")
+async def get_host_metrics(host_alias: str):
+    """
+    获取指定主机的 CPU、内存、磁盘、流量等实时性能指标 (免 Agent 纳秒/微秒级极轻量采集)
+    """
+    return await metrics_service.fetch_metrics(host_alias)
 
 @app.websocket("/ws/terminal/{host_alias}")
 async def terminal_websocket(websocket: WebSocket, host_alias: str):
@@ -77,6 +85,7 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
 
     if auth_data and auth_data.password:
         conn_kwargs["password"] = auth_data.password
+        metrics_service.set_credential(host_alias, auth_data.password)
 
     # 如果配置了 IdentityFile 并且文件存在
     client_keys = []

@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { store, currentHost, navigateWithContext } from '@/stores/workbenchStore'
+import { computed, ref } from 'vue'
+import {
+  store,
+  currentHost,
+  navigateWithContext,
+  refreshCurrentHostMetrics
+} from '@/stores/workbenchStore'
 import {
   Cpu,
   HardDrive,
@@ -9,19 +15,59 @@ import {
   FolderSync,
   Terminal,
   Sparkles,
+  RefreshCw,
+  Activity,
   X
 } from 'lucide-vue-next'
+
+const isRefreshing = ref(false)
+
+async function handleManualRefresh() {
+  if (isRefreshing.value) return
+  isRefreshing.value = true
+  try {
+    await refreshCurrentHostMetrics()
+  } finally {
+    setTimeout(() => {
+      isRefreshing.value = false
+    }, 400)
+  }
+}
+
+const cpuColorClass = computed(() => {
+  const usage = currentHost.value.cpuUsage
+  if (usage >= 80) return 'text-rose-400 font-bold'
+  if (usage >= 60) return 'text-amber-400 font-bold'
+  return 'text-emerald-400 font-semibold'
+})
+
+const memPercent = computed(() => {
+  const total = currentHost.value.memTotalGb || 1
+  return Math.round((currentHost.value.memUsedGb / total) * 100)
+})
+
+function formatSpeed(kbPerSec: number): string {
+  if (!kbPerSec || kbPerSec <= 0) return '0 KB/s'
+  if (kbPerSec >= 1024) {
+    return `${(kbPerSec / 1024).toFixed(2)} MB/s`
+  }
+  return `${Math.round(kbPerSec)} KB/s`
+}
 </script>
 
 <template>
-  <div class="bg-slate-900/90 border-b border-slate-800 px-3 py-1.5 flex items-center justify-between text-xs shrink-0">
-    <!-- 左侧：实时微缩指标条 (Mini HUD)，支持一键跳转对应模块 -->
+  <div class="bg-slate-900/90 border-b border-slate-800 px-3 py-1.5 flex items-center justify-between text-xs shrink-0 select-none">
+    <!-- 左侧：实时微缩性能指标条 (Mini HUD)，支持一键跳转对应模块 -->
     <div class="flex items-center gap-2 flex-wrap">
-      <span class="text-[11px] font-mono text-slate-400 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800">
+      <!-- 主机网络标识 -->
+      <span
+        class="text-[11px] font-mono text-slate-400 px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800"
+        :title="`系统内核: ${currentHost.kernel} | 运行时间: ${currentHost.uptime}`"
+      >
         {{ currentHost.user }}@{{ currentHost.ip }}:{{ currentHost.port }}
       </span>
 
-      <!-- 点击 CPU / 内存 直接跳到 P2 性能与进程中心 -->
+      <!-- 实时 CPU / 内存 / 负载指标块 (点击直达性能与进程中心) -->
       <button
         type="button"
         @click="
@@ -32,49 +78,75 @@ import {
           })
         "
         class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer"
-        title="点击查看性能与进程监控"
+        :title="`点击查看性能与进程详情 (Load: ${currentHost.loadAvg.join(', ')})`"
       >
-        <Cpu class="w-3.5 h-3.5 text-cyan-400" />
-        <span class="text-slate-300">CPU</span>
-        <span
-          :class="[
-            'font-mono font-semibold',
-            currentHost.cpuUsage > 60 ? 'text-amber-400' : 'text-emerald-400'
-          ]"
-        >
+        <Cpu class="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+        <span class="text-slate-400">CPU</span>
+        <span :class="['font-mono transition-colors duration-200', cpuColorClass]">
           {{ currentHost.cpuUsage }}%
         </span>
         <span class="text-slate-600">|</span>
-        <span class="text-slate-300">MEM</span>
+        <span class="text-slate-400">MEM</span>
         <span class="font-mono text-cyan-300">
           {{ currentHost.memUsedGb }}/{{ currentHost.memTotalGb }}GB
         </span>
+        <span class="text-[10px] text-slate-500 font-mono">({{ memPercent }}%)</span>
       </button>
 
-      <!-- 点击磁盘跳到 P3 文件管理磁盘分析 -->
+      <!-- 磁盘使用率 (点击直达文件管理中心) -->
       <button
         type="button"
         @click="
           navigateWithContext({
             sourcePage: store.activePage,
             targetPage: 'P3_FILES',
-            reason: '从顶部 Mini HUD 檢查目录磁盘占用',
+            reason: '从顶部 Mini HUD 检查目录磁盘占用',
             openPath: currentHost.currentCwd
           })
         "
         class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-950/90 hover:bg-slate-800 border border-slate-800/90 transition cursor-pointer"
+        :title="currentHost.diskUsedGb && currentHost.diskTotalGb ? `根分区已用 ${currentHost.diskUsedGb}GB / 共 ${currentHost.diskTotalGb}GB` : '点击进入文件管理'"
       >
-        <HardDrive class="w-3.5 h-3.5 text-indigo-400" />
-        <span class="text-slate-300">Disk</span>
+        <HardDrive class="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+        <span class="text-slate-400">Disk</span>
         <span class="font-mono text-indigo-300">{{ currentHost.diskUsedPercent }}%</span>
       </button>
 
-      <!-- 实时网络上下行速率 -->
-      <div class="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-950/90 border border-slate-800/90 font-mono text-[11px]">
-        <ArrowUpDown class="w-3.5 h-3.5 text-emerald-400" />
-        <span class="text-emerald-400">↑ {{ (currentHost.netUpKbps / 1024).toFixed(2) }} MB/s</span>
-        <span class="text-sky-400">↓ {{ (currentHost.netDownKbps / 1024).toFixed(2) }} MB/s</span>
+      <!-- 实时上下行网速 -->
+      <div
+        class="flex items-center gap-2 px-2.5 py-1 rounded bg-slate-950/90 border border-slate-800/90 font-mono text-[11px]"
+        title="网络实时吞吐量 (基于 /proc/net/dev 差值计算)"
+      >
+        <ArrowUpDown class="w-3.5 h-3.5 text-slate-500 shrink-0" />
+        <span class="text-emerald-400">↑ {{ formatSpeed(currentHost.netUpKbps) }}</span>
+        <span class="text-sky-400">↓ {{ formatSpeed(currentHost.netDownKbps) }}</span>
       </div>
+
+      <!-- 采样频率与自动更新状态胶囊 (点击立即触发一次采样) -->
+      <button
+        type="button"
+        @click="handleManualRefresh"
+        class="flex items-center gap-1.5 px-2 py-1 rounded bg-slate-950/90 hover:bg-slate-800/90 border border-slate-800/90 transition cursor-pointer text-slate-400 hover:text-slate-200"
+        title="免 Agent 纳秒级采集：默认每 3 秒自动轮询更新，点击立即手动采样"
+      >
+        <RefreshCw
+          :class="[
+            'w-3 h-3 transition-transform',
+            (isRefreshing || currentHost.metricsStatus === 'updating') ? 'animate-spin text-cyan-400' : 'text-slate-500'
+          ]"
+        />
+        <span class="font-mono text-[10px] flex items-center gap-1">
+          <span
+            :class="[
+              'w-1.5 h-1.5 rounded-full inline-block',
+              currentHost.metricsStatus === 'error'
+                ? 'bg-amber-400'
+                : 'bg-emerald-400 ring-2 ring-emerald-400/20'
+            ]"
+          />
+          <span>{{ currentHost.metricsStatus === 'error' ? '待连线' : '3s 轮询' }}</span>
+        </span>
+      </button>
 
       <!-- 防火墙状态徽章：点击跳到 P8 防火墙管理 -->
       <button

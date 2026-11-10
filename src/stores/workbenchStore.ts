@@ -1,4 +1,4 @@
-import { reactive, computed } from 'vue'
+import { reactive, computed, watch } from 'vue'
 import type {
   PageId,
   ServerHost,
@@ -777,11 +777,115 @@ export async function loadSshHostsFromBackend() {
         store.openHostIds = [backendHosts[0].host_alias]
         store.activeHostId = backendHosts[0].host_alias
       }
+
+      // 立即触发当前激活主机的性能数据采集与定时轮询
+      startMetricsPolling()
     }
   } catch {
     // 后端未启动时静默保持现有状态
   }
 }
+
+export interface HostMetricsResponse {
+  status: 'online' | 'error'
+  host_alias: string
+  timestamp: number
+  cpuUsage: number
+  cpuCores: number[]
+  loadAvg: [number, number, number]
+  memUsedGb: number
+  memTotalGb: number
+  swapUsedGb: number
+  swapTotalGb: number
+  diskUsedPercent: number
+  diskUsedGb?: number
+  diskTotalGb?: number
+  netUpKbps: number
+  netDownKbps: number
+  uptime: string
+  message?: string
+}
+
+let metricsTimer: ReturnType<typeof setInterval> | null = null
+export const METRICS_POLL_INTERVAL_MS = 3000 // 默认 3 秒更新频率，轻量且实时
+
+export async function fetchHostMetrics(hostId: string) {
+  const targetHost = store.hosts.find((h) => h.id === hostId)
+  if (!targetHost) return
+
+  targetHost.metricsStatus = 'updating'
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/metrics/${encodeURIComponent(hostId)}`)
+    if (!res.ok) {
+      targetHost.metricsStatus = 'error'
+      return
+    }
+    const data: HostMetricsResponse = await res.json()
+    if (data.status === 'online') {
+      targetHost.cpuUsage = data.cpuUsage
+      if (data.cpuCores && data.cpuCores.length > 0) {
+        targetHost.cpuCores = data.cpuCores
+      }
+      targetHost.loadAvg = data.loadAvg
+      targetHost.memUsedGb = data.memUsedGb
+      targetHost.memTotalGb = data.memTotalGb
+      targetHost.swapUsedGb = data.swapUsedGb
+      targetHost.swapTotalGb = data.swapTotalGb
+      targetHost.diskUsedPercent = data.diskUsedPercent
+      if (data.diskUsedGb !== undefined) targetHost.diskUsedGb = data.diskUsedGb
+      if (data.diskTotalGb !== undefined) targetHost.diskTotalGb = data.diskTotalGb
+      targetHost.netUpKbps = data.netUpKbps
+      targetHost.netDownKbps = data.netDownKbps
+      targetHost.uptime = data.uptime
+      targetHost.status = 'online'
+      targetHost.metricsStatus = 'synced'
+      targetHost.lastMetricsUpdate = Date.now()
+    } else {
+      targetHost.metricsStatus = 'error'
+    }
+  } catch {
+    targetHost.metricsStatus = 'error'
+  }
+}
+
+export function refreshCurrentHostMetrics() {
+  if (store.activeHostId) {
+    return fetchHostMetrics(store.activeHostId)
+  }
+}
+
+export function startMetricsPolling(interval = METRICS_POLL_INTERVAL_MS) {
+  if (metricsTimer) clearInterval(metricsTimer)
+  refreshCurrentHostMetrics()
+  metricsTimer = setInterval(() => {
+    if (typeof document !== 'undefined' && document.hidden) return
+    refreshCurrentHostMetrics()
+  }, interval)
+}
+
+export function stopMetricsPolling() {
+  if (metricsTimer) {
+    clearInterval(metricsTimer)
+    metricsTimer = null
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      refreshCurrentHostMetrics()
+    }
+  })
+}
+
+watch(
+  () => store.activeHostId,
+  (newId) => {
+    if (newId) {
+      refreshCurrentHostMetrics()
+    }
+  }
+)
 
 // 自动在客户端初始化时加载本地 ~/.ssh/config
 if (typeof window !== 'undefined') {

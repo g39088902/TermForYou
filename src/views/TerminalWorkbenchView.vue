@@ -53,6 +53,13 @@ function forceExecuteHighRisk() {
               <span class="w-1.5 h-1.5 rounded-full bg-emerald-400" />
               <span>已连接</span>
             </span>
+            <span
+              v-if="currentHost.uptime && currentHost.uptime !== '检测就绪'"
+              class="hidden sm:inline-block px-1.5 py-0.5 rounded bg-slate-800/80 text-slate-400 font-mono text-[10px]"
+              title="服务器已连续运行时间"
+            >
+              运行: {{ currentHost.uptime }}
+            </span>
           </div>
 
           <div class="flex items-center gap-2">

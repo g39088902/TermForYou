@@ -29,11 +29,15 @@ export interface ServerHost {
   swapUsedGb: number
   swapTotalGb: number
   diskUsedPercent: number
+  diskTotalGb?: number
+  diskUsedGb?: number
   netUpKbps: number
   netDownKbps: number
   firewallEnabled: boolean
   firewallBackend: 'ufw' | 'firewalld' | 'iptables'
   currentCwd: string
+  metricsStatus?: 'idle' | 'updating' | 'synced' | 'error'
+  lastMetricsUpdate?: number
 }
 
 export interface TerminalEntry {
