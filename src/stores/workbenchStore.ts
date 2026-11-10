@@ -730,8 +730,9 @@ export async function connectHost(hostId: string) {
   store.activeHostId = hostId
   store.activePage = 'P1_WORKBENCH'
 
-  // 4. 立即启动该主机的性能采集与定时轮询
+  // 4. 立即启动该主机的性能采集、全景数据探测与定时轮询
   startMetricsPolling()
+  inspectHost(hostId)
   showToast(`已成功连接至「${host.name}」(${host.ip}) · 累计连接 ${host.connectionCount || 1} 次`)
 }
 
@@ -882,7 +883,7 @@ export async function probeAllHosts(silent = false) {
   })
 
   if (!silent) {
-    showToast(`正在并发探测全部 ${store.hosts.length} 台服务器开机状态...`)
+    showToast(`正在并发探测全部 ${store.hosts.length} 台服务器开机状态与全页面系统数据...`)
   }
 
   try {
@@ -892,8 +893,14 @@ export async function probeAllHosts(silent = false) {
     if (!res.ok) {
       throw new Error(`Probe failed with status ${res.status}`)
     }
-    const data: { status: string; count: number; results: Record<string, ProbeResultItem> } = await res.json()
+    const data: {
+      status: string
+      count: number
+      results: Record<string, ProbeResultItem>
+      metrics?: Record<string, HostMetricsResponse>
+    } = await res.json()
     const results = data.results || {}
+    const metricsMap = data.metrics || {}
 
     let onlineCount = 0
     let offlineCount = 0
@@ -912,6 +919,30 @@ export async function probeAllHosts(silent = false) {
           if (host.status === 'unconnected' || host.status === 'offline') {
             host.status = 'online'
           }
+
+          // 同步后端并发采集的真实指标数据，填充卡片所有健康项
+          const m = metricsMap[host.id]
+          if (m && m.status === 'online') {
+            host.cpuUsage = m.cpuUsage
+            if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
+            if (m.loadAvg) host.loadAvg = m.loadAvg
+            host.memUsedGb = m.memUsedGb
+            host.memTotalGb = m.memTotalGb
+            host.swapUsedGb = m.swapUsedGb
+            host.swapTotalGb = m.swapTotalGb
+            host.diskUsedPercent = m.diskUsedPercent
+            if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
+            if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
+            host.netUpKbps = m.netUpKbps
+            host.netDownKbps = m.netDownKbps
+            host.uptime = m.uptime
+            if (m.os) host.os = m.os
+            if (m.kernel) host.kernel = m.kernel
+            if (m.firewallBackend) host.firewallBackend = m.firewallBackend
+            if (typeof m.firewallEnabled === 'boolean') host.firewallEnabled = m.firewallEnabled
+            host.metricsStatus = 'synced'
+            host.lastMetricsUpdate = Date.now()
+          }
         } else {
           offlineCount++
           host.status = 'offline'
@@ -921,8 +952,13 @@ export async function probeAllHosts(silent = false) {
       }
     }
 
+    // 若当前有已激活主机，同步探测刷新其全页面数据
+    if (store.activeHostId) {
+      inspectHost(store.activeHostId)
+    }
+
     if (!silent) {
-      showToast(`全量探测完成：${onlineCount} 台开机在线，${offlineCount} 台离线`)
+      showToast(`全量探测完成：${onlineCount} 台在线（已同步全页面数据），${offlineCount} 台离线`)
     }
   } catch (err) {
     store.hosts.forEach((h) => {
@@ -1047,10 +1083,70 @@ export async function fetchHostMetrics(hostId: string) {
   }
 }
 
+export async function inspectHost(hostId: string) {
+  const host = store.hosts.find((h) => h.id === hostId)
+  if (!host) return
+
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/inspect/${encodeURIComponent(hostId)}`)
+    if (!res.ok) return
+    const data = await res.json()
+    if (data.status === 'ok' || data.status === 'partial') {
+      // 1. 同步健康与系统性能指标
+      if (data.metrics && data.metrics.status === 'online') {
+        const m = data.metrics
+        host.cpuUsage = m.cpuUsage
+        if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
+        if (m.loadAvg) host.loadAvg = m.loadAvg
+        host.memUsedGb = m.memUsedGb
+        host.memTotalGb = m.memTotalGb
+        host.swapUsedGb = m.swapUsedGb
+        host.swapTotalGb = m.swapTotalGb
+        host.diskUsedPercent = m.diskUsedPercent
+        if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
+        if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
+        host.netUpKbps = m.netUpKbps
+        host.netDownKbps = m.netDownKbps
+        host.uptime = m.uptime
+        if (m.os) host.os = m.os
+        if (m.kernel) host.kernel = m.kernel
+        if (m.firewallBackend) host.firewallBackend = m.firewallBackend
+        if (typeof m.firewallEnabled === 'boolean') host.firewallEnabled = m.firewallEnabled
+        host.metricsStatus = 'synced'
+        host.lastMetricsUpdate = Date.now()
+      }
+
+      // 2. 若是当前正在操作的主机，深度实装所有页面含有的真实数据
+      if (store.activeHostId === hostId) {
+        if (Array.isArray(data.processes) && data.processes.length > 0) {
+          store.processes = data.processes
+        }
+        if (Array.isArray(data.dockerContainers) && data.dockerContainers.length > 0) {
+          store.dockerContainers = data.dockerContainers
+        }
+        if (Array.isArray(data.systemdServices) && data.systemdServices.length > 0) {
+          store.systemdServices = data.systemdServices
+        }
+        if (Array.isArray(data.cronTasks) && data.cronTasks.length > 0) {
+          store.cronTasks = data.cronTasks
+        }
+        if (Array.isArray(data.firewallRules) && data.firewallRules.length > 0) {
+          store.firewallRules = data.firewallRules
+        }
+        if (Array.isArray(data.files) && data.files.length > 0) {
+          store.files = data.files
+        }
+      }
+    }
+  } catch {
+    // 忽略异常
+  }
+}
+
 export async function probeHost(hostId: string) {
   const host = store.hosts.find((h) => h.id === hostId)
   if (!host) return
-  showToast(`正在探测主机「${host.name}」开机状态与连通性...`)
+  showToast(`正在深度探测主机「${host.name}」开机状态及全页面数据...`)
   host.powerStatus = 'checking'
 
   try {
@@ -1058,7 +1154,7 @@ export async function probeHost(hostId: string) {
       method: 'POST'
     })
     if (res.ok) {
-      const probeRes: ProbeResultItem = await res.json()
+      const probeRes = await res.json()
       host.powerStatus = probeRes.online ? 'online' : 'offline'
       host.pingMs = probeRes.rtt_ms ?? undefined
       host.sshBanner = probeRes.banner ?? undefined
@@ -1069,15 +1165,52 @@ export async function probeHost(hostId: string) {
       } else {
         host.status = 'offline'
       }
+
+      // 若后端已返回全页面深度探测数据
+      if (probeRes.inspection && (probeRes.inspection.status === 'ok' || probeRes.inspection.status === 'partial')) {
+        const insp = probeRes.inspection
+        if (insp.metrics && insp.metrics.status === 'online') {
+          const m = insp.metrics
+          host.cpuUsage = m.cpuUsage
+          if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
+          if (m.loadAvg) host.loadAvg = m.loadAvg
+          host.memUsedGb = m.memUsedGb
+          host.memTotalGb = m.memTotalGb
+          host.swapUsedGb = m.swapUsedGb
+          host.swapTotalGb = m.swapTotalGb
+          host.diskUsedPercent = m.diskUsedPercent
+          if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
+          if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
+          host.netUpKbps = m.netUpKbps
+          host.netDownKbps = m.netDownKbps
+          host.uptime = m.uptime
+          if (m.os) host.os = m.os
+          if (m.kernel) host.kernel = m.kernel
+          if (m.firewallBackend) host.firewallBackend = m.firewallBackend
+          if (typeof m.firewallEnabled === 'boolean') host.firewallEnabled = m.firewallEnabled
+          host.metricsStatus = 'synced'
+          host.lastMetricsUpdate = Date.now()
+        }
+
+        if (store.activeHostId === hostId) {
+          if (Array.isArray(insp.processes) && insp.processes.length > 0) store.processes = insp.processes
+          if (Array.isArray(insp.dockerContainers) && insp.dockerContainers.length > 0) store.dockerContainers = insp.dockerContainers
+          if (Array.isArray(insp.systemdServices) && insp.systemdServices.length > 0) store.systemdServices = insp.systemdServices
+          if (Array.isArray(insp.cronTasks) && insp.cronTasks.length > 0) store.cronTasks = insp.cronTasks
+          if (Array.isArray(insp.firewallRules) && insp.firewallRules.length > 0) store.firewallRules = insp.firewallRules
+          if (Array.isArray(insp.files) && insp.files.length > 0) store.files = insp.files
+        }
+      } else if (host.powerStatus === 'online') {
+        await inspectHost(hostId)
+      }
     }
   } catch {
     // 忽略错误
   }
 
-  // 若处于开机状态，进一步尝试获取系统指标
+  // 若处于开机状态，更新提示
   if (host.powerStatus === 'online') {
-    await fetchHostMetrics(hostId)
-    showToast(`探测成功:「${host.name}」已开机 (响应 ${host.pingMs || 0}ms${host.os ? ` · ${host.os}` : ''})`)
+    showToast(`深度探测成功:「${host.name}」已开机 (响应 ${host.pingMs || 0}ms · CPU ${host.cpuUsage ?? '--'}%${host.os ? ` · ${host.os}` : ''})`)
   } else {
     host.metricsStatus = 'error'
     showToast(`探测完成:「${host.name}」未能连通 (目标可能关机或网络不可达)`)

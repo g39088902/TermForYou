@@ -104,22 +104,56 @@ async def delete_ssh_host(host_alias: str):
 
 @app.post("/api/v1/ssh/probe/{host_alias}")
 async def probe_host_endpoint(host_alias: str):
-    """探测单台主机的开机状态与 SSH 端口响应延时"""
+    """探测单台主机的开机状态、端口响应延时及全页面数据"""
     host_info = find_host_by_alias(host_alias)
     if not host_info:
         raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
-    return await probe_single_host(host_info.host_alias, host_info.hostname, host_info.port)
+    probe_res = await probe_single_host(host_info.host_alias, host_info.hostname, host_info.port)
+    
+    # 若目标开机，进一步探测全页面数据
+    inspection_data = None
+    if probe_res.get("online"):
+        try:
+            inspection_data = await metrics_service.fetch_full_inspection(host_alias)
+        except Exception:
+            pass
+
+    return {
+        **probe_res,
+        "inspection": inspection_data
+    }
 
 @app.post("/api/v1/ssh/probe-all")
 async def probe_all_hosts_endpoint():
-    """并发批量探测全部服务器的开机与否状态与响应延迟"""
+    """并发批量探测全部服务器的开机与否状态与响应延迟，并对开机服务器并发采集系统全页面核心指标"""
     hosts = parse_ssh_config()
     results = await probe_all_hosts_concurrently(hosts)
+
+    # 筛选出开机在线的主机，并发采集系统指标 (CPU/内存/磁盘/操作系统/防火墙)
+    online_aliases = [
+        alias for alias, res in results.items()
+        if res.get("online")
+    ]
+    metrics_map = {}
+    if online_aliases:
+        metrics_map = await metrics_service.fetch_all_metrics(online_aliases)
+
     return {
         "status": "ok",
         "count": len(hosts),
-        "results": results
+        "results": results,
+        "metrics": metrics_map
     }
+
+@app.get("/api/v1/ssh/inspect/{host_alias}")
+async def inspect_host_endpoint(host_alias: str):
+    """
+    全页面深度数据探测：实时采集目标主机的性能监控、真实进程列表、Docker 容器、Systemd 服务、Crontab 计划任务、防火墙规则与文件树
+    """
+    host_info = find_host_by_alias(host_alias)
+    if not host_info:
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.fetch_full_inspection(host_alias)
 
 @app.get("/api/v1/ssh/config-path")
 async def get_config_info():

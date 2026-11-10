@@ -117,22 +117,26 @@ onMounted(() => {
         <button
           type="button"
           @click="toggleAutoProbe()"
-          class="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer"
+          class="flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-medium transition cursor-pointer select-none"
           :class="
             store.autoProbeEnabled
-              ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300 hover:bg-emerald-950/60'
+              ? 'bg-emerald-950/70 border-emerald-500/70 text-emerald-200 hover:bg-emerald-900/60 shadow-[0_0_12px_rgba(16,185,129,0.15)]'
               : 'bg-slate-950 border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-600'
           "
-          :title="store.autoProbeEnabled ? '自动探测已开启：每 30 秒静默全量探测开机状态与延迟' : '自动探测已停用：点击开启每 30 秒自动探测'"
+          :title="store.autoProbeEnabled ? '自动探测已开启：每 30 秒静默全量探测开机状态与全页面系统指标' : '自动探测已停用：点击开启每 30 秒自动探测'"
         >
           <span
             class="w-2 h-2 rounded-full"
-            :class="store.autoProbeEnabled ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'"
+            :class="store.autoProbeEnabled ? 'bg-emerald-400 animate-pulse shadow-[0_0_6px_#34d399]' : 'bg-slate-600'"
           />
           <span>自动探测 (30s)</span>
           <span
-            class="text-[10px] px-1.5 py-0.2 rounded font-mono"
-            :class="store.autoProbeEnabled ? 'bg-emerald-500/20 text-emerald-200' : 'bg-slate-800 text-slate-400'"
+            class="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold tracking-wider inline-flex items-center justify-center leading-none"
+            :class="
+              store.autoProbeEnabled
+                ? 'bg-emerald-400 text-slate-950 shadow-sm ring-1 ring-emerald-300'
+                : 'bg-slate-800 text-slate-300 border border-slate-700'
+            "
           >
             {{ store.autoProbeEnabled ? 'ON' : 'OFF' }}
           </span>
