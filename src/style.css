@@ -1,0 +1,370 @@
+@import "tailwindcss";
+
+/* ============================================================================
+ * 1. Day / Dark Theme Adaptive Color Tokens (modern-web-guidance: dark-mode & dark-mode-toggle)
+ * ============================================================================ */
+@theme {
+  /* Flip slate surface & text palette automatically between Light (Day) and Dark modes */
+  --color-slate-950: var(--surface-950);
+  --color-slate-900: var(--surface-900);
+  --color-slate-800: var(--surface-800);
+  --color-slate-700: var(--surface-700);
+  --color-slate-600: var(--text-600);
+  --color-slate-500: var(--text-500);
+  --color-slate-400: var(--text-400);
+  --color-slate-300: var(--text-300);
+  --color-slate-200: var(--text-200);
+  --color-slate-100: var(--text-100);
+
+  /* Adapt pastel text & deep tint tokens for WCAG 4.5:1 contrast on light surfaces */
+  --color-cyan-200: var(--tint-cyan-200);
+  --color-cyan-300: var(--tint-cyan-300);
+  --color-cyan-400: var(--tint-cyan-400);
+  --color-cyan-950: var(--tint-cyan-950);
+
+  --color-emerald-300: var(--tint-emerald-300);
+  --color-emerald-400: var(--tint-emerald-400);
+  --color-emerald-950: var(--tint-emerald-950);
+
+  --color-amber-300: var(--tint-amber-300);
+  --color-amber-400: var(--tint-amber-400);
+  --color-amber-950: var(--tint-amber-950);
+
+  --color-rose-200: var(--tint-rose-200);
+  --color-rose-300: var(--tint-rose-300);
+  --color-rose-400: var(--tint-rose-400);
+  --color-rose-950: var(--tint-rose-950);
+
+  --color-indigo-300: var(--tint-indigo-300);
+  --color-indigo-400: var(--tint-indigo-400);
+
+  --color-sky-300: var(--tint-sky-300);
+  --color-sky-400: var(--tint-sky-400);
+
+  --color-purple-300: var(--tint-purple-300);
+}
+
+:root {
+  /* Raw light and dark brand & scrollbar tokens */
+  --color-brand-light: #0284c7;
+  --color-brand-dark: #38bdf8;
+  --color-brand: var(--color-brand-light);
+
+  --color-scrollbar-track-light: #e2e8f0;
+  --color-scrollbar-track-dark: #0f172a;
+  --color-scrollbar-thumb-light: #64748b;
+  --color-scrollbar-thumb-dark: #475569;
+
+  --color-scrollbar-track: var(--color-scrollbar-track-light);
+  --color-scrollbar-thumb: var(--color-scrollbar-thumb-light);
+
+  /* Surface & Text fallback tokens (Light default for pre-light-dark() browsers) */
+  --surface-950: #f8fafc;
+  --surface-900: #ffffff;
+  --surface-800: #e2e8f0;
+  --surface-700: #cbd5e1;
+  --text-600: #64748b;
+  --text-500: #64748b;
+  --text-400: #475569;
+  --text-300: #334155;
+  --text-200: #1e293b;
+  --text-100: #0f172a;
+
+  --tint-cyan-200: #075985;
+  --tint-cyan-300: #0369a1;
+  --tint-cyan-400: #0284c7;
+  --tint-cyan-950: #e0f2fe;
+
+  --tint-emerald-300: #047857;
+  --tint-emerald-400: #059669;
+  --tint-emerald-950: #d1fae5;
+
+  --tint-amber-300: #b45309;
+  --tint-amber-400: #d97706;
+  --tint-amber-950: #fef3c7;
+
+  --tint-rose-200: #9f1239;
+  --tint-rose-300: #be123c;
+  --tint-rose-400: #e11d48;
+  --tint-rose-950: #ffe4e6;
+
+  --tint-indigo-300: #4338ca;
+  --tint-indigo-400: #4f46e5;
+
+  --tint-sky-300: #0369a1;
+  --tint-sky-400: #0284c7;
+
+  --tint-purple-300: #6d28d9;
+
+  /* Track resolved scheme for non-color branching (selector-atrule-combinations guide) */
+  --color-scheme: light;
+
+  /* MANDATORY: Fallback for browsers without light-dark() support */
+  @media (prefers-color-scheme: dark) {
+    --color-scheme: dark;
+    --color-brand: var(--color-brand-dark);
+    --color-scrollbar-track: var(--color-scrollbar-track-dark);
+    --color-scrollbar-thumb: var(--color-scrollbar-thumb-dark);
+
+    --surface-950: #020617;
+    --surface-900: #0f172a;
+    --surface-800: #1e293b;
+    --surface-700: #334155;
+    --text-600: #475569;
+    --text-500: #64748b;
+    --text-400: #94a3b8;
+    --text-300: #cbd5e1;
+    --text-200: #e2e8f0;
+    --text-100: #f1f5f9;
+
+    --tint-cyan-200: #a5f3fc;
+    --tint-cyan-300: #67e8f9;
+    --tint-cyan-400: #22d3ee;
+    --tint-cyan-950: #083344;
+
+    --tint-emerald-300: #6ee7b7;
+    --tint-emerald-400: #34d399;
+    --tint-emerald-950: #022c22;
+
+    --tint-amber-300: #fcd34d;
+    --tint-amber-400: #fbbf24;
+    --tint-amber-950: #451a03;
+
+    --tint-rose-200: #fecdd3;
+    --tint-rose-300: #fda4af;
+    --tint-rose-400: #fb7185;
+    --tint-rose-950: #4c0519;
+
+    --tint-indigo-300: #a5b4fc;
+    --tint-indigo-400: #818cf8;
+
+    --tint-sky-300: #7dd3fc;
+    --tint-sky-400: #38bdf8;
+
+    --tint-purple-300: #d8b4fe;
+  }
+
+  /* Map <meta name="color-scheme"> back to CSS color-scheme property (dark-mode-toggle guide) */
+  color-scheme: light dark;
+
+  &:has(> head > meta[name="color-scheme"][content="dark"]) {
+    color-scheme: dark;
+    --color-scheme: dark;
+  }
+
+  &:has(> head > meta[name="color-scheme"][content="light"]) {
+    color-scheme: light;
+    --color-scheme: light;
+  }
+
+  @supports (color: light-dark(white, black)) {
+    --color-brand: light-dark(var(--color-brand-light), var(--color-brand-dark));
+    --color-scrollbar-track: light-dark(var(--color-scrollbar-track-light), var(--color-scrollbar-track-dark));
+    --color-scrollbar-thumb: light-dark(var(--color-scrollbar-thumb-light), var(--color-scrollbar-thumb-dark));
+
+    --surface-950: light-dark(#f8fafc, #020617);
+    --surface-900: light-dark(#ffffff, #0f172a);
+    --surface-800: light-dark(#e2e8f0, #1e293b);
+    --surface-700: light-dark(#cbd5e1, #334155);
+    --text-600: light-dark(#64748b, #475569);
+    --text-500: light-dark(#64748b, #64748b);
+    --text-400: light-dark(#475569, #94a3b8);
+    --text-300: light-dark(#334155, #cbd5e1);
+    --text-200: light-dark(#1e293b, #e2e8f0);
+    --text-100: light-dark(#0f172a, #f1f5f9);
+
+    --tint-cyan-200: light-dark(#075985, #a5f3fc);
+    --tint-cyan-300: light-dark(#0369a1, #67e8f9);
+    --tint-cyan-400: light-dark(#0284c7, #22d3ee);
+    --tint-cyan-950: light-dark(#e0f2fe, #083344);
+
+    --tint-emerald-300: light-dark(#047857, #6ee7b7);
+    --tint-emerald-400: light-dark(#059669, #34d399);
+    --tint-emerald-950: light-dark(#d1fae5, #022c22);
+
+    --tint-amber-300: light-dark(#b45309, #fcd34d);
+    --tint-amber-400: light-dark(#d97706, #fbbf24);
+    --tint-amber-950: light-dark(#fef3c7, #451a03);
+
+    --tint-rose-200: light-dark(#9f1239, #fecdd3);
+    --tint-rose-300: light-dark(#be123c, #fda4af);
+    --tint-rose-400: light-dark(#e11d48, #fb7185);
+    --tint-rose-950: light-dark(#ffe4e6, #4c0519);
+
+    --tint-indigo-300: light-dark(#4338ca, #a5b4fc);
+    --tint-indigo-400: light-dark(#4f46e5, #818cf8);
+
+    --tint-sky-300: light-dark(#0369a1, #7dd3fc);
+    --tint-sky-400: light-dark(#0284c7, #38bdf8);
+
+    --tint-purple-300: light-dark(#6d28d9, #d8b4fe);
+  }
+
+  accent-color: var(--color-brand);
+
+  /* Pair custom scrollbar colors with scrollbar-width so macOS renders them */
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-scrollbar-thumb) var(--color-scrollbar-track);
+}
+
+/* ============================================================================
+ * 2. Non-color Visibility Utilities for Theme Toggle (selector-atrule-combinations guide)
+ * ============================================================================ */
+/* Fallback for browsers without container style queries */
+.if-dark {
+  display: none !important;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) {
+    .if-dark {
+      display: inline-flex !important;
+    }
+    .if-light {
+      display: none !important;
+    }
+  }
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) {
+  .if-dark {
+    display: inline-flex !important;
+  }
+  .if-light {
+    display: none !important;
+  }
+}
+
+/* Modern container style query branching */
+@container not style(--color-scheme: dark) {
+  .if-dark {
+    display: none !important;
+  }
+}
+
+@container not style(--color-scheme: light) {
+  .if-light {
+    display: none !important;
+  }
+}
+
+/* Tri-state theme toggle icon branching mapped to <meta name="color-scheme"> */
+.if-scheme-light,
+.if-scheme-dark,
+.if-scheme-auto {
+  display: none !important;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="light"]) .if-scheme-light {
+  display: inline-flex !important;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) .if-scheme-dark {
+  display: inline-flex !important;
+}
+
+:root:not(:has(> head > meta[name="color-scheme"][content="light"])):not(:has(> head > meta[name="color-scheme"][content="dark"])) .if-scheme-auto {
+  display: inline-flex !important;
+}
+
+/* Legacy fallback for WebKit/Blink browsers without scrollbar-color support */
+@supports not (scrollbar-color: auto) {
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: var(--color-scrollbar-thumb);
+  }
+
+  ::-webkit-scrollbar-track {
+    background: var(--color-scrollbar-track);
+  }
+}
+
+/* MANDATORY (dialog guide): without both rules, scrolling over the backdrop or inside the dialog scrolls the page behind it */
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: light-dark(rgb(15 23 42 / 0.45), rgb(2 6 23 / 0.75));
+  backdrop-filter: blur(4px);
+}
+
+/* Responsive Data Table Wrapper (responsive-table guide) */
+.table-wrapper {
+  overflow: auto;
+  max-inline-size: 100%;
+  container-type: inline-size;
+}
+
+.table-wrapper table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+}
+
+.table-wrapper thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 2;
+}
+
+.table-wrapper tbody th {
+  position: sticky;
+  inset-inline-start: 0;
+  z-index: 1;
+  background-color: var(--surface-900);
+}
+
+@container (width < 600px) {
+  .table-wrapper table,
+  .table-wrapper thead,
+  .table-wrapper tbody,
+  .table-wrapper tr,
+  .table-wrapper th,
+  .table-wrapper td {
+    display: block;
+  }
+
+  .table-wrapper thead {
+    /* MANDATORY: Hide column header from layout and screen readers */
+    display: none;
+  }
+
+  .table-wrapper tr {
+    margin-block-end: 0.75rem;
+    border: 1px solid var(--surface-800);
+    border-radius: 0.5rem;
+    padding: 0.5rem;
+  }
+
+  .table-wrapper tbody th {
+    position: sticky;
+    inset-block-start: 0;
+    z-index: 2;
+    background: var(--surface-800);
+  }
+
+  .table-wrapper td:nth-child(2)::before {
+    content: var(--label-2, "") ": ";
+    color: var(--text-400);
+    font-weight: 500;
+  }
+
+  .table-wrapper td:nth-child(3)::before {
+    content: var(--label-3, "") ": ";
+    color: var(--text-400);
+    font-weight: 500;
+  }
+
+  .table-wrapper td:nth-child(4)::before {
+    content: var(--label-4, "") ": ";
+    color: var(--text-400);
+    font-weight: 500;
+  }
+}

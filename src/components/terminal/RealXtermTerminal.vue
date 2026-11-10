@@ -1,0 +1,319 @@
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { Terminal, type ITheme } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
+import { KeyRound, RefreshCw } from 'lucide-vue-next'
+import { resolvedColorScheme } from '@/stores/workbenchStore'
+
+const props = defineProps<{
+  hostAlias: string
+}>()
+
+const terminalEl = ref<HTMLDivElement | null>(null)
+let term: Terminal | null = null
+let fitAddon: FitAddon | null = null
+let ws: WebSocket | null = null
+
+const isConnecting = ref(false)
+const isConnected = ref(false)
+const needPassword = ref(false)
+const passwordInput = ref('')
+const authErrorMsg = ref('')
+
+// 暗色主题配色（深空灰黑 + 高对比亮青/绿光标）
+const DARK_TERMINAL_THEME: ITheme = {
+  background: '#020617', // slate-950
+  foreground: '#f8fafc', // slate-50
+  cursor: '#22d3ee', // cyan-400
+  cursorAccent: '#020617',
+  selectionBackground: 'rgba(8, 145, 178, 0.4)',
+  black: '#0f172a',
+  red: '#f87171',
+  green: '#4ade80',
+  yellow: '#facc15',
+  blue: '#60a5fa',
+  magenta: '#c084fc',
+  cyan: '#22d3ee',
+  white: '#f8fafc',
+  brightBlack: '#64748b',
+  brightRed: '#ef4444',
+  brightGreen: '#22c55e',
+  brightYellow: '#eab308',
+  brightBlue: '#3b82f6',
+  brightMagenta: '#a855f7',
+  brightCyan: '#38bdf8',
+  brightWhite: '#ffffff'
+}
+
+// 亮色主题配色（与 --surface-950 #f8fafc 严格对齐的高对比度调色盘）
+const LIGHT_TERMINAL_THEME: ITheme = {
+  background: '#f8fafc',
+  foreground: '#0f172a', // slate-900
+  cursor: '#0284c7', // sky-600
+  cursorAccent: '#f8fafc',
+  selectionBackground: 'rgba(2, 132, 199, 0.25)',
+  black: '#0f172a',
+  red: '#dc2626',
+  green: '#15803d',
+  yellow: '#b45309',
+  blue: '#2563eb',
+  magenta: '#7e22ce',
+  cyan: '#0e7490',
+  white: '#64748b',
+  brightBlack: '#475569',
+  brightRed: '#b91c1c',
+  brightGreen: '#166534',
+  brightYellow: '#854d0e',
+  brightBlue: '#1d4ed8',
+  brightMagenta: '#6b21a8',
+  brightCyan: '#155e75',
+  brightWhite: '#0f172a'
+}
+
+function getTerminalTheme(scheme: 'light' | 'dark'): ITheme {
+  return scheme === 'dark' ? DARK_TERMINAL_THEME : LIGHT_TERMINAL_THEME
+}
+
+function connectTerminal(password?: string) {
+  if (!props.hostAlias) return
+  if (ws) {
+    ws.close()
+    ws = null
+  }
+
+  isConnecting.value = true
+  needPassword.value = false
+  authErrorMsg.value = ''
+
+  if (term) {
+    term.reset()
+    term.writeln(`\x1b[36m[TermForYou] 正在初始化与本地 Python 后端的终端会话通道...\x1b[0m`)
+  }
+
+  const wsUrl = `ws://127.0.0.1:8000/ws/terminal/${encodeURIComponent(props.hostAlias)}`
+  ws = new WebSocket(wsUrl)
+
+  ws.onopen = () => {
+    isConnecting.value = false
+    isConnected.value = true
+
+    // 发送第一帧初始化与认证数据
+    const cols = term ? term.cols : 120
+    const rows = term ? term.rows : 34
+    ws?.send(
+      JSON.stringify({
+        action: 'auth',
+        payload: {
+          password: password || undefined,
+          cols,
+          rows,
+          term: 'xterm-256color'
+        }
+      })
+    )
+  }
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data)
+      if (msg.action === 'stdout' || msg.action === 'stderr') {
+        term?.write(msg.payload)
+      } else if (msg.action === 'auth_required') {
+        needPassword.value = true
+        authErrorMsg.value = msg.payload || '需要输入 SSH 密码以继续连接'
+        term?.writeln(`\r\n\x1b[33m${authErrorMsg.value}\x1b[0m\r\n`)
+      }
+    } catch {
+      term?.write(event.data)
+    }
+  }
+
+  ws.onerror = () => {
+    isConnecting.value = false
+    isConnected.value = false
+    term?.writeln('\r\n\x1b[31m[TermForYou] WebSocket 通信异常，请确认 Python 后端服务运行在 http://127.0.0.1:8000\x1b[0m\r\n')
+  }
+
+  ws.onclose = () => {
+    isConnecting.value = false
+    isConnected.value = false
+    term?.writeln('\r\n\x1b[33m[TermForYou] SSH 会话已断开。\x1b[0m\r\n')
+  }
+}
+
+function submitPassword() {
+  if (!passwordInput.value) return
+  const pwd = passwordInput.value
+  passwordInput.value = ''
+  connectTerminal(pwd)
+}
+
+function handleResize() {
+  if (!fitAddon || !term || !ws || ws.readyState !== WebSocket.OPEN) return
+  try {
+    fitAddon.fit()
+    ws.send(
+      JSON.stringify({
+        action: 'resize',
+        payload: {
+          cols: term.cols,
+          rows: term.rows
+        }
+      })
+    )
+  } catch {
+    // ignore
+  }
+}
+
+onMounted(() => {
+  nextTick(() => {
+    if (!terminalEl.value) return
+
+    term = new Terminal({
+      cursorBlink: true,
+      fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+      fontSize: 13,
+      lineHeight: 1.25,
+      theme: getTerminalTheme(resolvedColorScheme.value)
+    })
+
+    fitAddon = new FitAddon()
+    term.loadAddon(fitAddon)
+    term.open(terminalEl.value)
+
+    setTimeout(() => {
+      fitAddon?.fit()
+    }, 100)
+
+    // 用户在 xterm 敲击键盘输入，直接通过 WebSocket 发往 Python 后端
+    term.onData((data) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            action: 'stdin',
+            payload: data
+          })
+        )
+      }
+    })
+
+    window.addEventListener('resize', handleResize)
+    connectTerminal()
+  })
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize)
+  if (ws) {
+    ws.close()
+    ws = null
+  }
+  if (term) {
+    term.dispose()
+    term = null
+  }
+})
+
+// 监听主题变化，动态热更新终端调色板（不重连，无感平滑切换）
+watch(resolvedColorScheme, (newScheme) => {
+  if (term) {
+    term.options.theme = getTerminalTheme(newScheme)
+  }
+})
+
+watch(
+  () => props.hostAlias,
+  (newVal, oldVal) => {
+    if (newVal !== oldVal) {
+      connectTerminal()
+    }
+  }
+)
+</script>
+
+<template>
+  <div class="relative w-full h-full flex flex-col bg-slate-950 overflow-hidden select-text">
+    <!-- 终端状态信息条 -->
+    <div class="h-7 px-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs shrink-0 select-none">
+      <div class="flex items-center gap-2">
+        <span
+          :class="[
+            'w-2 h-2 rounded-full',
+            isConnected ? 'bg-emerald-400 shadow-[0_0_6px_#34d399]' : isConnecting ? 'bg-amber-400 animate-pulse' : 'bg-slate-500'
+          ]"
+        />
+        <span class="font-mono text-slate-300">{{ props.hostAlias }}</span>
+        <span class="text-[11px] text-slate-500">· 原生 xterm.js + Python asyncssh PTY</span>
+      </div>
+
+      <button
+        type="button"
+        @click="connectTerminal()"
+        class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-100 border border-slate-700/60 cursor-pointer transition"
+        title="重新连接终端"
+      >
+        <RefreshCw class="w-3 h-3" />
+        <span>重连</span>
+      </button>
+    </div>
+
+    <!-- xterm 容器 -->
+    <div ref="terminalEl" class="flex-1 w-full h-full p-2 bg-slate-950 overflow-hidden" />
+
+    <!-- 临时密码交互输入弹窗 (In-Memory 纯临时会话，绝不落地磁盘) -->
+    <div
+      v-if="needPassword"
+      class="absolute inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center p-4 z-20"
+    >
+      <div class="w-full max-w-sm rounded-xl bg-slate-900 border border-slate-800 p-5 shadow-2xl space-y-4">
+        <div class="flex items-center gap-2.5 text-amber-400">
+          <KeyRound class="w-5 h-5 shrink-0" />
+          <h3 class="text-sm font-bold text-slate-100">输入 SSH 会话临时密码</h3>
+        </div>
+
+        <p class="text-xs text-slate-400 leading-relaxed">
+          目标主机 <span class="font-mono text-cyan-300 font-semibold">{{ props.hostAlias }}</span> 未配置免密私钥。
+          密码仅在当前内存会话握手时使用，<span class="text-emerald-400 font-medium">绝不落地写入任何存储或数据库</span>。
+        </p>
+
+        <form @submit.prevent="submitPassword" class="space-y-3">
+          <input
+            v-model="passwordInput"
+            type="password"
+            autofocus
+            placeholder="输入 SSH 登录密码..."
+            class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-slate-100 focus:outline-none focus:border-cyan-500 font-mono"
+          />
+
+          <div class="flex items-center justify-end gap-2 pt-1">
+            <button
+              type="button"
+              @click="needPassword = false"
+              class="px-3 py-1.5 rounded-lg text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+            >
+              取消
+            </button>
+            <button
+              type="submit"
+              class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white cursor-pointer"
+            >
+              连接
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style>
+/* 保证 xterm 视口完美撑满容器 */
+.xterm {
+  height: 100%;
+}
+.xterm-viewport {
+  overflow-y: auto !important;
+}
+</style>
