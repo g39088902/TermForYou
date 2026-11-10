@@ -40,6 +40,11 @@ export interface ServerHost {
   lastMetricsUpdate?: number
   connectionCount?: number
   lastConnectedAt?: number
+  powerStatus?: 'online' | 'offline' | 'checking' | 'unknown'
+  pingMs?: number
+  probeMessage?: string
+  sshBanner?: string
+  lastProbedAt?: number
 }
 
 export interface TerminalEntry {

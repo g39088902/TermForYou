@@ -6,10 +6,17 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import asyncssh
 
-from models import SshHostInfo, TerminalAuthPayload
-from ssh_config_parser import parse_ssh_config, find_host_by_alias, get_ssh_config_path
+from models import SshHostInfo, TerminalAuthPayload, CreateHostPayload
+from ssh_config_parser import (
+    parse_ssh_config,
+    find_host_by_alias,
+    get_ssh_config_path,
+    delete_host_from_ssh_config,
+    add_host_to_ssh_config,
+)
 from metrics_collector import metrics_service
-from db import init_db, get_all_host_stats, record_manual_connection
+from db import init_db, get_all_host_stats, record_manual_connection, delete_host_stat
+from probe_service import probe_single_host, probe_all_hosts_concurrently
 
 app = FastAPI(title="TermForYou SSH Backend", version="1.0.0")
 
@@ -50,6 +57,68 @@ async def record_host_connect(host_alias: str):
     return {
         "status": "ok",
         "stat": stat
+    }
+
+@app.post("/api/v1/ssh/hosts")
+async def create_ssh_host(payload: CreateHostPayload):
+    """持久化新增或修改主机配置至 ~/.ssh/config"""
+    add_host_to_ssh_config(
+        host_alias=payload.host_alias,
+        hostname=payload.hostname,
+        port=payload.port,
+        user=payload.user
+    )
+    return {
+        "status": "ok",
+        "message": f"主机「{payload.host_alias}」已成功持久化写入 ~/.ssh/config",
+        "host_alias": payload.host_alias
+    }
+
+@app.delete("/api/v1/ssh/hosts/{host_alias}")
+async def delete_ssh_host(host_alias: str):
+    """
+    持久删除指定服务器配置：
+    1. 从 ~/.ssh/config 中彻底移除 Host 块 (自动备份 ~/.ssh/config.bak)
+    2. 从 SQLite host_stats 中清理连接历史与频次
+    3. 清理内存连接缓存
+    """
+    deleted_from_config = delete_host_from_ssh_config(host_alias)
+    deleted_from_db = delete_host_stat(host_alias)
+
+    # 清理 metrics 缓存和已建连接
+    if host_alias in metrics_service._connections:
+        conn = metrics_service._connections.pop(host_alias, None)
+        if conn and not conn.is_closed():
+            conn.close()
+    metrics_service._last_raw.pop(host_alias, None)
+    metrics_service._last_result.pop(host_alias, None)
+    metrics_service._credentials.pop(host_alias, None)
+
+    return {
+        "status": "ok",
+        "host_alias": host_alias,
+        "deleted_from_config": deleted_from_config,
+        "deleted_from_db": deleted_from_db,
+        "message": f"主机「{host_alias}」配置与统计数据已彻底持久删除"
+    }
+
+@app.post("/api/v1/ssh/probe/{host_alias}")
+async def probe_host_endpoint(host_alias: str):
+    """探测单台主机的开机状态与 SSH 端口响应延时"""
+    host_info = find_host_by_alias(host_alias)
+    if not host_info:
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await probe_single_host(host_info.host_alias, host_info.hostname, host_info.port)
+
+@app.post("/api/v1/ssh/probe-all")
+async def probe_all_hosts_endpoint():
+    """并发批量探测全部服务器的开机与否状态与响应延迟"""
+    hosts = parse_ssh_config()
+    results = await probe_all_hosts_concurrently(hosts)
+    return {
+        "status": "ok",
+        "count": len(hosts),
+        "results": results
     }
 
 @app.get("/api/v1/ssh/config-path")

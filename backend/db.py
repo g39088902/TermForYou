@@ -69,3 +69,12 @@ def record_manual_connection(host_alias: str) -> Dict[str, Any]:
             "connection_count": 1,
             "last_connected_at": now_ts
         }
+
+def delete_host_stat(host_alias: str) -> bool:
+    """从数据库中删除主机的连接统计记录"""
+    init_db()
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM host_stats WHERE host_alias = ?", (host_alias,))
+        conn.commit()
+        return cursor.rowcount > 0

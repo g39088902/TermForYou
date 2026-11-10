@@ -101,6 +101,12 @@ export const store = reactive({
   // 服务器主机池 (初始为空，从后端 ~/.ssh/config 异步加载真实配置)
   hosts: [] as ServerHost[],
 
+  // 主机连接池开机状态与探测控制
+  autoProbeEnabled: typeof window !== 'undefined'
+    ? localStorage.getItem('termforyou_auto_probe') !== 'false'
+    : true,
+  isProbingAll: false,
+
   // 终端会话记录
   terminalHistory: [
     {
@@ -747,13 +753,225 @@ export async function loadSshHostsFromBackend() {
         tags: h.identity_files.length > 0 ? ['密钥认证', ...h.identity_files.map(k => k.split('/').pop() || 'key')] : ['免密/密码认证'],
         connectionCount: h.connection_count ?? 0,
         lastConnectedAt: h.last_connected_at ?? undefined,
-        metricsStatus: 'idle'
+        metricsStatus: 'idle',
+        powerStatus: 'unknown'
       }))
-      // 保持进入项目默认处于“主机连接池”页面，未手动连接前不打开会话标签与性能轮询
+      // 首次加载成功后，自动执行一次全部服务器开机与连通性探测
+      probeAllHosts(true)
     }
   } catch {
     // 后端未启动时静默保持现有状态
   }
+}
+
+// 持久彻底删除某台服务器配置 (从 ~/.ssh/config 与 SQLite 中同时移除)
+export async function deleteHostPermanently(hostId: string): Promise<boolean> {
+  const host = store.hosts.find((h) => h.id === hostId)
+  const hostName = host?.name || hostId
+
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/hosts/${encodeURIComponent(hostId)}`, {
+      method: 'DELETE'
+    })
+    if (!res.ok) {
+      showToast(`删除服务器失败：后端接口响应异常 (${res.status})`)
+      return false
+    }
+  } catch {
+    // 若后端连不上，提示用户
+    showToast(`无法连接后端服务，暂未能从本地配置文件中物理删除`)
+    return false
+  }
+
+  // 1. 从前端主机池移除
+  store.hosts = store.hosts.filter((h) => h.id !== hostId)
+
+  // 2. 清理顶栏已打开的会话标签
+  store.openHostIds = store.openHostIds.filter((id) => id !== hostId)
+
+  // 3. 如果当前处于该主机中，切回剩余会话或返回主机池
+  if (store.activeHostId === hostId) {
+    if (store.openHostIds.length > 0) {
+      store.activeHostId = store.openHostIds[0]
+    } else {
+      store.activeHostId = ''
+      store.activePage = 'P0_HOSTS'
+    }
+  }
+
+  showToast(`已持久彻底删除服务器「${hostName}」配置`)
+  return true
+}
+
+// 持久添加一台服务器配置到 ~/.ssh/config 并立即探测
+export async function addHostPermanently(payload: {
+  name: string
+  ip: string
+  port?: number
+  user?: string
+}) {
+  const port = payload.port || 22
+  const user = payload.user?.trim() || 'root'
+  const alias = payload.name.trim()
+  const ip = payload.ip.trim()
+
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/v1/ssh/hosts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        host_alias: alias,
+        hostname: ip,
+        port,
+        user
+      })
+    })
+    if (res.ok) {
+      showToast(`已持久添加主机「${alias}」至 ~/.ssh/config`)
+    }
+  } catch {
+    // 忽略错误，前端先行
+  }
+
+  // 更新前端列表
+  const existingIdx = store.hosts.findIndex((h) => h.id === alias)
+  const newHost: ServerHost = {
+    id: alias,
+    name: alias,
+    ip,
+    port,
+    user,
+    group: '~/.ssh/config 本地配置',
+    status: 'unconnected',
+    tags: ['自定义新增'],
+    metricsStatus: 'idle',
+    powerStatus: 'checking',
+    connectionCount: 0
+  }
+
+  if (existingIdx >= 0) {
+    store.hosts[existingIdx] = newHost
+  } else {
+    store.hosts.unshift(newHost)
+  }
+
+  // 立即探测单台开机状态
+  await probeHost(alias)
+}
+
+export interface ProbeResultItem {
+  host_alias: string
+  hostname: string
+  port: number
+  status: 'online' | 'offline'
+  online: boolean
+  rtt_ms: number | null
+  banner: string | null
+  message: string
+  timestamp: number
+}
+
+// 批量并发探测所有服务器开机状态
+export async function probeAllHosts(silent = false) {
+  if (store.isProbingAll) return
+  if (store.hosts.length === 0) return
+
+  store.isProbingAll = true
+  store.hosts.forEach((h) => {
+    h.powerStatus = 'checking'
+  })
+
+  if (!silent) {
+    showToast(`正在并发探测全部 ${store.hosts.length} 台服务器开机状态...`)
+  }
+
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/v1/ssh/probe-all', {
+      method: 'POST'
+    })
+    if (!res.ok) {
+      throw new Error(`Probe failed with status ${res.status}`)
+    }
+    const data: { status: string; count: number; results: Record<string, ProbeResultItem> } = await res.json()
+    const results = data.results || {}
+
+    let onlineCount = 0
+    let offlineCount = 0
+
+    for (const host of store.hosts) {
+      const probeRes = results[host.id]
+      if (probeRes) {
+        host.powerStatus = probeRes.online ? 'online' : 'offline'
+        host.pingMs = probeRes.rtt_ms ?? undefined
+        host.sshBanner = probeRes.banner ?? undefined
+        host.probeMessage = probeRes.message
+        host.lastProbedAt = probeRes.timestamp ? probeRes.timestamp * 1000 : Date.now()
+
+        if (probeRes.online) {
+          onlineCount++
+          if (host.status === 'unconnected' || host.status === 'offline') {
+            host.status = 'online'
+          }
+        } else {
+          offlineCount++
+          host.status = 'offline'
+        }
+      } else {
+        host.powerStatus = 'unknown'
+      }
+    }
+
+    if (!silent) {
+      showToast(`全量探测完成：${onlineCount} 台开机在线，${offlineCount} 台离线`)
+    }
+  } catch (err) {
+    store.hosts.forEach((h) => {
+      if (h.powerStatus === 'checking') h.powerStatus = 'unknown'
+    })
+    if (!silent) {
+      showToast(`探测失败：后端服务未响应`)
+    }
+  } finally {
+    store.isProbingAll = false
+  }
+}
+
+// 自动探测定时轮询控制 (每 30 秒静默探测所有服务器)
+let autoProbeInterval: ReturnType<typeof setInterval> | null = null
+
+export function initAutoProbeTimer() {
+  if (autoProbeInterval) clearInterval(autoProbeInterval)
+  if (store.autoProbeEnabled) {
+    autoProbeInterval = setInterval(() => {
+      // 当处于后台标签或非主机连接池时可静默探测
+      if (typeof document !== 'undefined' && document.hidden) return
+      probeAllHosts(true)
+    }, 30000)
+  }
+}
+
+export function toggleAutoProbe(targetState?: boolean) {
+  const next = targetState !== undefined ? targetState : !store.autoProbeEnabled
+  store.autoProbeEnabled = next
+  if (typeof window !== 'undefined') {
+    localStorage.setItem('termforyou_auto_probe', next ? 'true' : 'false')
+  }
+  if (next) {
+    showToast('已开启自动探测：每 30 秒自动探测全部服务器开机状态')
+    initAutoProbeTimer()
+    probeAllHosts(false)
+  } else {
+    if (autoProbeInterval) {
+      clearInterval(autoProbeInterval)
+      autoProbeInterval = null
+    }
+    showToast('已停用自动探测')
+  }
+}
+
+// 启动初始自动探测定时器
+if (typeof window !== 'undefined') {
+  initAutoProbeTimer()
 }
 
 export interface HostMetricsResponse {
@@ -832,12 +1050,37 @@ export async function fetchHostMetrics(hostId: string) {
 export async function probeHost(hostId: string) {
   const host = store.hosts.find((h) => h.id === hostId)
   if (!host) return
-  showToast(`正在探测主机「${host.name}」的实时系统与性能指标...`)
-  await fetchHostMetrics(hostId)
-  if (host.status === 'online') {
-    showToast(`探测成功:「${host.name}」(${host.os || 'Linux'}) 运行正常`)
+  showToast(`正在探测主机「${host.name}」开机状态与连通性...`)
+  host.powerStatus = 'checking'
+
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/probe/${encodeURIComponent(hostId)}`, {
+      method: 'POST'
+    })
+    if (res.ok) {
+      const probeRes: ProbeResultItem = await res.json()
+      host.powerStatus = probeRes.online ? 'online' : 'offline'
+      host.pingMs = probeRes.rtt_ms ?? undefined
+      host.sshBanner = probeRes.banner ?? undefined
+      host.probeMessage = probeRes.message
+      host.lastProbedAt = probeRes.timestamp ? probeRes.timestamp * 1000 : Date.now()
+      if (probeRes.online) {
+        host.status = 'online'
+      } else {
+        host.status = 'offline'
+      }
+    }
+  } catch {
+    // 忽略错误
+  }
+
+  // 若处于开机状态，进一步尝试获取系统指标
+  if (host.powerStatus === 'online') {
+    await fetchHostMetrics(hostId)
+    showToast(`探测成功:「${host.name}」已开机 (响应 ${host.pingMs || 0}ms${host.os ? ` · ${host.os}` : ''})`)
   } else {
-    showToast(`探测失败: 无法连通「${host.name}」(${host.ip})`)
+    host.metricsStatus = 'error'
+    showToast(`探测完成:「${host.name}」未能连通 (目标可能关机或网络不可达)`)
   }
 }
 

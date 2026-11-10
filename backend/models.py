@@ -13,6 +13,12 @@ class SshHostInfo(BaseModel):
     connection_count: int = 0 # 用户手动连接次数
     last_connected_at: Optional[int] = None # 最后连接时间戳 (Unix Timestamp 秒)
 
+class CreateHostPayload(BaseModel):
+    host_alias: str
+    hostname: str
+    user: str = "root"
+    port: int = 22
+
 class TerminalAuthPayload(BaseModel):
     password: Optional[str] = None
     passphrase: Optional[str] = None

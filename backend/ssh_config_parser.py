@@ -88,3 +88,82 @@ def find_host_by_alias(alias: str) -> Optional[SshHostInfo]:
         if h.host_alias == alias or h.id == alias:
             return h
     return None
+
+def delete_host_from_ssh_config(target_alias: str) -> bool:
+    """
+    从 ~/.ssh/config 中持久删除指定 host_alias 的 Host 配置块。
+    操作前自动将原文件备份为 ~/.ssh/config.bak。
+    """
+    config_path = get_ssh_config_path()
+    if not os.path.exists(config_path):
+        return False
+
+    with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    i = 0
+    deleted = False
+
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        # 遇到非注释的 Host 关键字行
+        if not stripped.startswith("#") and re.match(r"^host\s+", stripped, re.IGNORECASE):
+            parts = re.split(r"\s+", stripped, maxsplit=1)
+            aliases = parts[1].split() if len(parts) > 1 else []
+
+            if target_alias in aliases:
+                deleted = True
+                if len(aliases) > 1:
+                    # 仅移除这一个 alias，保留该块其他 alias
+                    remaining = [a for a in aliases if a != target_alias]
+                    indent = line[:line.lower().find("host")]
+                    new_lines.append(f"{indent}Host {' '.join(remaining)}\n")
+                    i += 1
+                    continue
+                else:
+                    # 单一 alias，跳过整个 block 直到下一个 Host 行或文件末尾
+                    i += 1
+                    while i < len(lines):
+                        next_line = lines[i]
+                        next_stripped = next_line.strip()
+                        if not next_stripped.startswith("#") and re.match(r"^host\s+", next_stripped, re.IGNORECASE):
+                            break
+                        i += 1
+                    continue
+
+        new_lines.append(line)
+        i += 1
+
+    if deleted:
+        # 备份原文件
+        try:
+            bak_path = config_path + ".bak"
+            with open(bak_path, "w", encoding="utf-8") as f_bak:
+                f_bak.writelines(lines)
+        except Exception:
+            pass
+
+        # 写入更新后的内容
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+
+    return deleted
+
+def add_host_to_ssh_config(host_alias: str, hostname: str, port: int = 22, user: str = "root") -> bool:
+    """
+    向 ~/.ssh/config 持久追加或更新服务器配置。
+    """
+    config_path = get_ssh_config_path()
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+
+    # 如果已存在同名 host 先移除旧块
+    if os.path.exists(config_path):
+        delete_host_from_ssh_config(host_alias)
+
+    block = f"\nHost {host_alias}\n  HostName {hostname}\n  Port {port}\n  User {user}\n"
+    with open(config_path, "a", encoding="utf-8") as f:
+        f.write(block)
+
+    return True
