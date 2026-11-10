@@ -175,6 +175,7 @@ function formatSpeed(kbPerSec: number): string {
             ? 'bg-emerald-950/40 border-emerald-700/50 text-emerald-300 hover:bg-emerald-900/40'
             : 'bg-rose-950/50 border-rose-700/50 text-rose-300 hover:bg-rose-900/40'
         ]"
+        :title="`宿主机底层防火墙: ${currentHost.firewallBackend.toUpperCase()} | 状态: ${currentHost.firewallEnabled ? '运行中且生效' : '服务未激活或已停止'}\n点击直达防火墙管理与端口矩阵`"
       >
         <ShieldCheck v-if="currentHost.firewallEnabled" class="w-3.5 h-3.5" />
         <ShieldAlert v-else class="w-3.5 h-3.5" />

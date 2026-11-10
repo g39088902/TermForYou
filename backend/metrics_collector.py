@@ -63,6 +63,50 @@ try:
                     break
     kernel_ver = os.uname().release if hasattr(os, "uname") else ""
 
+    # 动态探测宿主机防火墙真实状态 (firewalld / ufw / iptables)
+    fw_backend = "iptables"
+    fw_enabled = False
+    try:
+        import shutil, subprocess
+        has_firewalld = bool(shutil.which("firewall-cmd")) or os.path.exists("/usr/bin/firewall-cmd")
+        has_ufw = bool(shutil.which("ufw")) or os.path.exists("/usr/sbin/ufw")
+
+        # 优先检测活跃状态的系统守护进程
+        if has_firewalld and subprocess.run(["systemctl", "is-active", "--quiet", "firewalld"], timeout=1).returncode == 0:
+            fw_backend = "firewalld"
+            fw_enabled = True
+        elif has_ufw and subprocess.run(["systemctl", "is-active", "--quiet", "ufw"], timeout=1).returncode == 0:
+            fw_backend = "ufw"
+            fw_enabled = True
+        elif subprocess.run(["systemctl", "is-active", "--quiet", "iptables"], timeout=1).returncode == 0:
+            fw_backend = "iptables"
+            fw_enabled = True
+        else:
+            # 若无独立 daemon，检测原生 iptables 是否配置了拦截/过滤规则
+            try:
+                r_ipt = subprocess.run(["iptables", "-S", "INPUT"], capture_output=True, text=True, timeout=1)
+                if r_ipt.returncode == 0:
+                    lines = [l.strip() for l in r_ipt.stdout.splitlines() if l.strip()]
+                    has_filter = any("-j DROP" in l or "-j REJECT" in l for l in lines)
+                    policy_drop = any("-P INPUT DROP" in l or "-P INPUT REJECT" in l for l in lines)
+                    if policy_drop or has_filter:
+                        fw_backend = "iptables"
+                        fw_enabled = True
+            except Exception:
+                pass
+
+            # 若均未激活，根据系统原生组件归属决定宿主机防火墙管理工具，状态标记为未开启 (False)
+            if not fw_enabled:
+                if has_firewalld:
+                    fw_backend = "firewalld"
+                elif has_ufw:
+                    fw_backend = "ufw"
+                else:
+                    fw_backend = "iptables"
+                fw_enabled = False
+    except Exception:
+        pass
+
     print(json.dumps({
         "status": "ok",
         "load": load,
@@ -80,7 +124,9 @@ try:
         "tx_bytes": tx_bytes,
         "uptime_sec": uptime_sec,
         "os": os_name,
-        "kernel": kernel_ver
+        "kernel": kernel_ver,
+        "firewall_backend": fw_backend,
+        "firewall_enabled": fw_enabled
     }))
 except Exception as e:
     print(json.dumps({"status": "error", "message": str(e)}))
@@ -294,6 +340,8 @@ class HostMetricsService:
                     "uptime": uptime_str,
                     "os": raw_data.get("os", "Linux"),
                     "kernel": raw_data.get("kernel", ""),
+                    "firewallBackend": raw_data.get("firewall_backend", "iptables"),
+                    "firewallEnabled": bool(raw_data.get("firewall_enabled", False)),
                 }
                 self._last_result[host_alias] = result
                 return result

@@ -53,6 +53,12 @@ const underlyingCliPreview = computed(() => {
     const fromPart = r.sourceCidr === '0.0.0.0/0' ? 'any' : r.sourceCidr
     return `sudo ufw ${actionVerb} from ${fromPart} to any port ${r.port} proto ${r.protocol} comment '${r.comment}'`
   }
+  if (currentHost.value.firewallBackend === 'firewalld') {
+    if (r.action === 'ALLOW') {
+      return `sudo firewall-cmd --permanent --add-port=${r.port}/${r.protocol} && sudo firewall-cmd --reload`
+    }
+    return `sudo firewall-cmd --permanent --remove-port=${r.port}/${r.protocol} && sudo firewall-cmd --reload`
+  }
   return `sudo iptables -A INPUT -p ${r.protocol} --dport ${r.port} -s ${r.sourceCidr} -j ${r.action === 'ALLOW' ? 'ACCEPT' : 'DROP'}`
 })
 
@@ -127,6 +133,18 @@ function saveFirewallRuleToSnippets() {
           <h1 class="text-sm font-bold text-slate-100 flex items-center gap-2">
             <Shield class="w-4 h-4 text-cyan-400" />
             <span>端口监听与防火墙对照 ({{ currentHost.firewallBackend.toUpperCase() }})</span>
+            <span
+              :class="[
+                'text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1',
+                currentHost.firewallEnabled
+                  ? 'bg-emerald-950/60 border-emerald-700/60 text-emerald-300'
+                  : 'bg-rose-950/60 border-rose-700/60 text-rose-300'
+              ]"
+            >
+              <ShieldCheck v-if="currentHost.firewallEnabled" class="w-3 h-3" />
+              <ShieldAlert v-else class="w-3 h-3" />
+              {{ currentHost.firewallEnabled ? '服务运行中' : '未开启 / 已停止' }}
+            </span>
           </h1>
           <p class="text-xs text-slate-400 mt-0.5">
             实时比对本地服务监听端口与防火墙规则放行状态。

@@ -767,8 +767,8 @@ export async function loadSshHostsFromBackend() {
         diskUsedPercent: 35,
         netUpKbps: 45,
         netDownKbps: 120,
-        firewallEnabled: true,
-        firewallBackend: 'ufw',
+        firewallEnabled: false,
+        firewallBackend: 'iptables',
         currentCwd: '~'
       }))
 
@@ -805,6 +805,8 @@ export interface HostMetricsResponse {
   uptime: string
   os?: string
   kernel?: string
+  firewallBackend?: 'ufw' | 'firewalld' | 'iptables'
+  firewallEnabled?: boolean
   message?: string
 }
 
@@ -841,6 +843,8 @@ export async function fetchHostMetrics(hostId: string) {
       targetHost.uptime = data.uptime
       if (data.os) targetHost.os = data.os
       if (data.kernel) targetHost.kernel = data.kernel
+      if (data.firewallBackend) targetHost.firewallBackend = data.firewallBackend
+      if (typeof data.firewallEnabled === 'boolean') targetHost.firewallEnabled = data.firewallEnabled
       targetHost.status = 'online'
       targetHost.metricsStatus = 'synced'
       targetHost.lastMetricsUpdate = Date.now()
