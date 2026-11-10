@@ -24,13 +24,15 @@ function switchHost(hostId: string) {
 
 function closeHostTab(hostId: string, e: MouseEvent) {
   e.stopPropagation()
-  if (store.openHostIds.length <= 1) {
-    showToast('至少保留一个活动服务器会话标签')
-    return
-  }
   store.openHostIds = store.openHostIds.filter((id) => id !== hostId)
   if (store.activeHostId === hostId) {
-    store.activeHostId = store.openHostIds[0]
+    if (store.openHostIds.length > 0) {
+      store.activeHostId = store.openHostIds[0]
+    } else {
+      store.activeHostId = ''
+      store.activePage = 'P0_HOSTS'
+      showToast('已关闭所有活动会话，返回主机连接池')
+    }
   }
 }
 </script>
@@ -58,7 +60,7 @@ function closeHostTab(hostId: string, e: MouseEvent) {
       <div class="h-4 w-px bg-slate-800 shrink-0 mx-0.5" />
 
       <!-- 多服务器会话 Tabs -->
-      <div class="flex items-center gap-1.5">
+      <div v-if="store.openHostIds.length > 0" class="flex items-center gap-1.5">
         <div
           v-for="hostId in store.openHostIds"
           :key="hostId"
@@ -100,6 +102,17 @@ function closeHostTab(hostId: string, e: MouseEvent) {
           class="p-1.5 rounded-md bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-800 cursor-pointer"
         >
           <Plus class="w-3.5 h-3.5" />
+        </button>
+      </div>
+
+      <div v-else class="flex items-center gap-2 text-xs text-slate-500 pl-1">
+        <span>当前无活动会话</span>
+        <button
+          type="button"
+          @click="store.activePage = 'P0_HOSTS'"
+          class="text-cyan-400 hover:underline cursor-pointer text-xs"
+        >
+          去连接服务器 →
         </button>
       </div>
     </div>

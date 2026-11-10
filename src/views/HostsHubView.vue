@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { store, showToast, probeHost } from '@/stores/workbenchStore'
+import { store, showToast, probeHost, connectHost } from '@/stores/workbenchStore'
 import {
   Server,
   Terminal,
@@ -11,7 +11,8 @@ import {
   HardDrive,
   FolderGit2,
   Trash2,
-  RefreshCw
+  RefreshCw,
+  Flame
 } from 'lucide-vue-next'
 
 const newHostName = ref('')
@@ -19,14 +20,13 @@ const newHostIp = ref('')
 const newHostUser = ref('root')
 const newHostPort = ref(22)
 
-function connectHost(hostId: string) {
-  if (!store.openHostIds.includes(hostId)) {
-    store.openHostIds.push(hostId)
-  }
-  store.activeHostId = hostId
-  store.activePage = 'P1_WORKBENCH'
-  const host = store.hosts.find((h) => h.id === hostId)
-  showToast(`已通过 SSH 免 Agent 模式连接至 ${host?.name} (${host?.ip})`)
+function formatLastConnected(ts?: number) {
+  if (!ts) return '从未连接'
+  const diffSec = Math.floor(Date.now() / 1000) - ts
+  if (diffSec < 60) return '刚刚'
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} 小时前`
+  return `${Math.floor(diffSec / 86400)} 天前`
 }
 
 function removeHost(hostId: string, hostName: string) {
@@ -40,13 +40,10 @@ function removeHost(hostId: string, hostName: string) {
   // 2. 清理顶栏已打开的会话标签
   store.openHostIds = store.openHostIds.filter((id) => id !== hostId)
 
-  // 3. 如果当前正处于该主机会话中，切换至剩余主机
+  // 3. 如果当前正处于该主机会话中，切换至剩余主机或回到主机池
   if (store.activeHostId === hostId) {
     if (store.openHostIds.length > 0) {
       store.activeHostId = store.openHostIds[0]
-    } else if (store.hosts.length > 0) {
-      store.activeHostId = store.hosts[0].id
-      store.openHostIds.push(store.hosts[0].id)
     } else {
       store.activeHostId = ''
       store.activePage = 'P0_HOSTS'
@@ -69,7 +66,8 @@ function quickAddHost() {
     group: '自定义新增节点',
     status: 'unconnected',
     tags: ['自定义节点'],
-    metricsStatus: 'idle'
+    metricsStatus: 'idle',
+    connectionCount: 0
   })
   newHostName.value = ''
   newHostIp.value = ''
@@ -85,9 +83,12 @@ function quickAddHost() {
         <h1 class="text-lg font-bold text-slate-100 flex items-center gap-2">
           <Server class="w-5 h-5 text-cyan-400" />
           <span>主机连接池</span>
+          <span class="text-xs px-2 py-0.5 rounded-full bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 font-normal">
+            按手动连接次数降序
+          </span>
         </h1>
         <p class="text-xs text-slate-400 mt-1">
-          管理与连接远程服务器，支持交互终端、文件传输与系统服务状态监控。
+          管理与连接远程服务器。主机列表依据手动连接频次降序排序并由后端 SQLite 持久化存储；未连接时其他功能导航将保持锁定。
         </p>
       </div>
 
@@ -185,6 +186,21 @@ function quickAddHost() {
 
           <!-- 标签组 -->
           <div class="flex items-center gap-1.5 flex-wrap">
+            <!-- 用户手动连接频次徽章 (基于 SQLite 持久化) -->
+            <span
+              :class="[
+                'px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1 font-mono',
+                (host.connectionCount ?? 0) > 0
+                  ? 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                  : 'bg-slate-800/80 text-slate-500 border border-slate-700/50'
+              ]"
+              :title="host.lastConnectedAt ? `最近连接时间: ${formatLastConnected(host.lastConnectedAt)}` : '尚未连接过该服务器'"
+            >
+              <Flame v-if="(host.connectionCount ?? 0) > 0" class="w-3 h-3 text-amber-400" />
+              <span>{{ (host.connectionCount ?? 0) > 0 ? `连接 ${host.connectionCount} 次` : '从未连接' }}</span>
+              <span v-if="host.lastConnectedAt" class="text-slate-400 text-[9px]">({{ formatLastConnected(host.lastConnectedAt) }})</span>
+            </span>
+
             <span
               v-for="tag in host.tags"
               :key="tag"

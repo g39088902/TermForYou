@@ -41,8 +41,8 @@ const INITIAL_HISTORY_LINES: string[] = [
 ]
 
 export const store = reactive({
-  // 当前主页面路由
-  activePage: 'P1_WORKBENCH' as PageId,
+  // 当前主页面路由 (默认进入主机连接池页面)
+  activePage: 'P0_HOSTS' as PageId,
 
   // 色彩模式状态 ('light dark' 跟随系统 | 'light' 白天模式 | 'dark' 暗黑模式)
   colorSchemePref: (typeof window !== 'undefined'
@@ -53,9 +53,9 @@ export const store = reactive({
       ? window.matchMedia('(prefers-color-scheme: dark)').matches
       : true,
 
-  // 已打开的服务器会话 Tabs
-  openHostIds: ['prod-web-01', 'db-master-02'] as string[],
-  activeHostId: 'prod-web-01',
+  // 已打开的服务器会话 Tabs (初始未连接任何服务器)
+  openHostIds: [] as string[],
+  activeHostId: '',
 
   // 底部随行终端抽屉开关 (在 P2-P8 页面保持 SSH 会话不断开)
   bottomTerminalOpen: false,
@@ -98,87 +98,8 @@ export const store = reactive({
     ]
   },
 
-  // 服务器主机池
-  hosts: [
-    {
-      id: 'prod-web-01',
-      name: 'Prod-Web-Gateway-01',
-      ip: '47.98.132.210',
-      port: 22,
-      user: 'root',
-      group: '生产集群 (华东)',
-      os: 'Ubuntu 24.04.1 LTS',
-      kernel: '6.8.0-45-generic',
-      uptime: '48 天 14 小时',
-      status: 'online',
-      tags: ['Nginx', 'Docker', '核心入口'],
-      cpuUsage: 32,
-      cpuCores: [45, 28, 39, 19, 52, 24, 30, 18],
-      loadAvg: [1.42, 1.18, 0.95],
-      memUsedGb: 9.4,
-      memTotalGb: 16,
-      swapUsedGb: 0.4,
-      swapTotalGb: 4,
-      diskUsedPercent: 64,
-      netUpKbps: 2840,
-      netDownKbps: 1420,
-      firewallEnabled: true,
-      firewallBackend: 'ufw',
-      currentCwd: '/etc/nginx'
-    },
-    {
-      id: 'db-master-02',
-      name: 'DB-Postgres-Master-02',
-      ip: '10.16.40.12',
-      port: 2222,
-      user: 'postgres',
-      group: '生产集群 (华东)',
-      os: 'Debian 12.7 (Bookworm)',
-      kernel: '6.1.0-25-amd64',
-      uptime: '129 天 03 小时',
-      status: 'warning',
-      tags: ['PostgreSQL 16', 'Redis', '内网主库'],
-      cpuUsage: 68,
-      cpuCores: [78, 82, 64, 59, 71, 60, 66, 62],
-      loadAvg: [4.85, 4.12, 3.60],
-      memUsedGb: 26.8,
-      memTotalGb: 32,
-      swapUsedGb: 1.8,
-      swapTotalGb: 8,
-      diskUsedPercent: 81,
-      netUpKbps: 6420,
-      netDownKbps: 5190,
-      firewallEnabled: true,
-      firewallBackend: 'iptables',
-      currentCwd: '/var/lib/postgresql/data'
-    },
-    {
-      id: 'ai-gpu-node-03',
-      name: 'AI-Inference-L40S-03',
-      ip: '192.168.88.105',
-      port: 22,
-      user: 'ubuntu',
-      group: '算力与测试节点',
-      os: 'Ubuntu 22.04.4 LTS',
-      kernel: '5.15.0-119-generic',
-      uptime: '15 天 08 小时',
-      status: 'online',
-      tags: ['GPU', 'vLLM', 'Docker'],
-      cpuUsage: 19,
-      cpuCores: [15, 22, 18, 25, 14, 19, 20, 17],
-      loadAvg: [0.88, 1.02, 1.15],
-      memUsedGb: 41.2,
-      memTotalGb: 64,
-      swapUsedGb: 0,
-      swapTotalGb: 16,
-      diskUsedPercent: 47,
-      netUpKbps: 820,
-      netDownKbps: 310,
-      firewallEnabled: false,
-      firewallBackend: 'ufw',
-      currentCwd: '/opt/models'
-    }
-  ] as ServerHost[],
+  // 服务器主机池 (初始为空，从后端 ~/.ssh/config 异步加载真实配置)
+  hosts: [] as ServerHost[],
 
   // 终端会话记录
   terminalHistory: [
@@ -686,9 +607,30 @@ WantedBy=multi-user.target`
   ] as FirewallRuleItem[]
 })
 
-// 计算当前激活的服务器对象
+const FALLBACK_EMPTY_HOST: ServerHost = {
+  id: '',
+  name: '未连接服务器',
+  ip: '--',
+  port: 22,
+  user: '--',
+  group: '未连接',
+  status: 'unconnected',
+  tags: [],
+  metricsStatus: 'idle',
+  connectionCount: 0
+}
+
+// 计算当前用户是否已连接任何服务器
+export const hasConnectedHost = computed<boolean>(() => {
+  return store.openHostIds.length > 0 && !!store.activeHostId
+})
+
+// 计算当前激活的服务器对象 (若未连接，安全回退至空对象避免空指针)
 export const currentHost = computed<ServerHost>(() => {
-  return store.hosts.find((h) => h.id === store.activeHostId) ?? store.hosts[0]
+  if (!store.activeHostId) {
+    return store.hosts[0] ?? FALLBACK_EMPTY_HOST
+  }
+  return store.hosts.find((h) => h.id === store.activeHostId) ?? store.hosts[0] ?? FALLBACK_EMPTY_HOST
 })
 
 // 实时运行 AST 骨架聚类提炼引擎
@@ -713,6 +655,12 @@ export function showToast(msg: string) {
 
 // 核心：跨模块上下文跳转动作
 export function navigateWithContext(payload: CrossModuleLinkPayload) {
+  if (!hasConnectedHost.value && payload.targetPage !== 'P0_HOSTS') {
+    showToast('请先在主机连接池中连接一台服务器')
+    store.activePage = 'P0_HOSTS'
+    return
+  }
+
   store.lastJumpContext = payload
   store.activePage = payload.targetPage
 
@@ -736,9 +684,52 @@ export interface BackendSshHost {
   identity_files: string[]
   proxy_jump?: string | null
   auth_hint: string
+  connection_count?: number
+  last_connected_at?: number | null
 }
 
-// 从本地 Python 后端加载真实 ~/.ssh/config 主机列表
+// 用户手动连接某台服务器：持久化至 SQLite 数据库并按连接次数降序重排
+export async function connectHost(hostId: string) {
+  const host = store.hosts.find((h) => h.id === hostId)
+  if (!host) return
+
+  // 1. 发起后端记录连接次数请求
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/hosts/${encodeURIComponent(hostId)}/connect`, {
+      method: 'POST'
+    })
+    if (res.ok) {
+      const data = await res.json()
+      if (data.stat) {
+        host.connectionCount = data.stat.connection_count
+        host.lastConnectedAt = data.stat.last_connected_at
+      }
+    }
+  } catch {
+    host.connectionCount = (host.connectionCount || 0) + 1
+    host.lastConnectedAt = Math.floor(Date.now() / 1000)
+  }
+
+  // 2. 重新按用户手动连接的次数降序排序 (若次数相同按最后连接时间降序)
+  store.hosts.sort((a, b) => {
+    const countDiff = (b.connectionCount ?? 0) - (a.connectionCount ?? 0)
+    if (countDiff !== 0) return countDiff
+    return (b.lastConnectedAt ?? 0) - (a.lastConnectedAt ?? 0)
+  })
+
+  // 3. 打开会话标签并切换至终端工作台
+  if (!store.openHostIds.includes(hostId)) {
+    store.openHostIds.push(hostId)
+  }
+  store.activeHostId = hostId
+  store.activePage = 'P1_WORKBENCH'
+
+  // 4. 立即启动该主机的性能采集与定时轮询
+  startMetricsPolling()
+  showToast(`已成功连接至「${host.name}」(${host.ip}) · 累计连接 ${host.connectionCount || 1} 次`)
+}
+
+// 从本地 Python 后端加载真实 ~/.ssh/config 主机列表 (按连接次数降序)
 export async function loadSshHostsFromBackend() {
   try {
     const res = await fetch('http://127.0.0.1:8000/api/v1/ssh/hosts')
@@ -754,17 +745,11 @@ export async function loadSshHostsFromBackend() {
         group: '~/.ssh/config 本地配置',
         status: 'unconnected',
         tags: h.identity_files.length > 0 ? ['密钥认证', ...h.identity_files.map(k => k.split('/').pop() || 'key')] : ['免密/密码认证'],
+        connectionCount: h.connection_count ?? 0,
+        lastConnectedAt: h.last_connected_at ?? undefined,
         metricsStatus: 'idle'
       }))
-
-      // 同步更新打开的会话标签
-      if (!store.openHostIds.includes(backendHosts[0].host_alias)) {
-        store.openHostIds = [backendHosts[0].host_alias]
-        store.activeHostId = backendHosts[0].host_alias
-      }
-
-      // 立即触发当前激活主机的性能数据采集与定时轮询
-      startMetricsPolling()
+      // 保持进入项目默认处于“主机连接池”页面，未手动连接前不打开会话标签与性能轮询
     }
   } catch {
     // 后端未启动时静默保持现有状态
@@ -891,6 +876,8 @@ watch(
   (newId) => {
     if (newId) {
       refreshCurrentHostMetrics()
+    } else {
+      stopMetricsPolling()
     }
   }
 )

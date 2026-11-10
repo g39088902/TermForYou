@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
-import { store } from '@/stores/workbenchStore'
+import { onMounted, onUnmounted, watch } from 'vue'
+import { store, hasConnectedHost, showToast } from '@/stores/workbenchStore'
 import TopSessionBar from '@/components/layout/TopSessionBar.vue'
 import MiniHudBar from '@/components/layout/MiniHudBar.vue'
 import SidebarNav from '@/components/layout/SidebarNav.vue'
@@ -26,11 +26,26 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     store.commandPaletteOpen = !store.commandPaletteOpen
   } else if (e.ctrlKey && e.key === '`') {
     e.preventDefault()
+    if (!hasConnectedHost.value) {
+      showToast('未连接任何服务器：请先在「主机连接池」选择并连接一台服务器')
+      return
+    }
     if (store.activePage !== 'P1_WORKBENCH') {
       store.bottomTerminalOpen = !store.bottomTerminalOpen
     }
   }
 }
+
+// 路由安全看门狗：如果用户未连接任何服务器，强制停留在主机连接池 P0_HOSTS
+watch(
+  () => [hasConnectedHost.value, store.activePage],
+  ([connected, page]) => {
+    if (!connected && page !== 'P0_HOSTS') {
+      store.activePage = 'P0_HOSTS'
+    }
+  },
+  { immediate: true }
+)
 
 onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown)
@@ -51,8 +66,8 @@ onUnmounted(() => {
       <!-- 顶部多服务器会话标签与全局命令栏 -->
       <TopSessionBar />
 
-      <!-- 顶部常驻微缩遥测指标与联动横幅 (Mini HUD) -->
-      <MiniHudBar v-if="store.activePage !== 'P0_HOSTS'" />
+      <!-- 顶部常驻微缩遥测指标与联动横幅 (Mini HUD，仅当已连接服务器且非主机池页面时呈现) -->
+      <MiniHudBar v-if="store.activePage !== 'P0_HOSTS' && hasConnectedHost" />
 
       <!-- 中央主舞台 + 随行终端 -->
       <div class="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden relative">

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { store, extractedClusters } from '@/stores/workbenchStore'
+import { store, extractedClusters, hasConnectedHost, showToast } from '@/stores/workbenchStore'
 import type { PageId } from '@/types'
 import {
   LayoutGrid,
@@ -11,16 +11,33 @@ import {
   Container,
   Cog,
   CalendarClock,
-  Shield
+  Shield,
+  Lock
 } from 'lucide-vue-next'
 
 const unallowedPortCount = computed(() => {
+  if (!hasConnectedHost.value) return 0
   return store.processes.filter((p) => p.listenPort && p.firewallAllowed === false).length
 })
 
 const failedServiceCount = computed(() => {
+  if (!hasConnectedHost.value) return 0
   return store.systemdServices.filter((s) => s.state === 'failed').length
 })
+
+function handleNavClick(itemId: PageId) {
+  if (itemId === 'P0_HOSTS') {
+    store.activePage = 'P0_HOSTS'
+    return
+  }
+
+  if (!hasConnectedHost.value) {
+    showToast('未连接任何服务器：请先在「主机连接池」选择并连接一台服务器')
+    return
+  }
+
+  store.activePage = itemId
+}
 
 const navItems = computed(() => [
   {
@@ -116,38 +133,52 @@ const navItems = computed(() => [
         v-for="item in navItems"
         :key="item.id"
         type="button"
-        @click="store.activePage = item.id"
+        @click="handleNavClick(item.id)"
+        :title="!hasConnectedHost && item.id !== 'P0_HOSTS' ? '未连接任何服务器，请先在主机连接池连接' : ''"
         :class="[
-          'w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs font-medium transition cursor-pointer',
-          store.activePage === item.id
-            ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 shadow-sm'
-            : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200 border border-transparent'
+          'w-full flex items-center justify-between px-2.5 py-2 rounded-lg text-xs font-medium transition',
+          !hasConnectedHost && item.id !== 'P0_HOSTS'
+            ? 'opacity-35 cursor-not-allowed text-slate-600 border border-transparent'
+            : store.activePage === item.id
+              ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/40 shadow-sm cursor-pointer'
+              : 'text-slate-400 hover:bg-slate-900 hover:text-slate-200 border border-transparent cursor-pointer'
         ]"
       >
-        <div class="flex items-center gap-2.5">
+        <div class="flex items-center gap-2.5 min-w-0">
           <component
             :is="item.icon"
             :class="[
-              'w-4 h-4',
-              store.activePage === item.id ? 'text-cyan-400' : 'text-slate-400'
+              'w-4 h-4 shrink-0',
+              !hasConnectedHost && item.id !== 'P0_HOSTS'
+                ? 'text-slate-600'
+                : store.activePage === item.id
+                  ? 'text-cyan-400'
+                  : 'text-slate-400'
             ]"
           />
-          <span>{{ item.label }}</span>
+          <span class="truncate">{{ item.label }}</span>
         </div>
 
-        <span
-          v-if="item.badge"
-          :class="[
-            'px-1.5 py-0.5 text-[10px] rounded-full font-mono',
-            item.dangerBadge
-              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-              : item.warnBadge
-                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                : 'bg-slate-800 text-slate-300'
-          ]"
-        >
-          {{ item.badge }}
-        </span>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <Lock
+            v-if="!hasConnectedHost && item.id !== 'P0_HOSTS'"
+            class="w-3 h-3 text-slate-600"
+          />
+
+          <span
+            v-else-if="item.badge"
+            :class="[
+              'px-1.5 py-0.5 text-[10px] rounded-full font-mono',
+              item.dangerBadge
+                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                : item.warnBadge
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                  : 'bg-slate-800 text-slate-300'
+            ]"
+          >
+            {{ item.badge }}
+          </span>
+        </div>
       </button>
     </nav>
   </aside>

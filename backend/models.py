@@ -10,6 +10,8 @@ class SshHostInfo(BaseModel):
     identity_files: List[str] = [] # 指定的密钥路径 (IdentityFile)
     proxy_jump: Optional[str] = None # 跳板机
     auth_hint: str = "key"  # "key" | "password" | "agent"
+    connection_count: int = 0 # 用户手动连接次数
+    last_connected_at: Optional[int] = None # 最后连接时间戳 (Unix Timestamp 秒)
 
 class TerminalAuthPayload(BaseModel):
     password: Optional[str] = None

@@ -38,6 +38,8 @@ export interface ServerHost {
   currentCwd?: string
   metricsStatus?: 'idle' | 'updating' | 'synced' | 'error'
   lastMetricsUpdate?: number
+  connectionCount?: number
+  lastConnectedAt?: number
 }
 
 export interface TerminalEntry {
