@@ -17,11 +17,27 @@ import {
   FolderOpen,
   Cog,
   Container,
-  Skull
+  Skull,
+  ArrowUp,
+  ArrowDown,
+  HardDriveDownload,
+  HardDriveUpload,
+  Database
 } from 'lucide-vue-next'
 
 const searchQuery = ref('')
 const onlyListeningPorts = ref(false)
+
+function formatSpeed(kbps?: number): string {
+  if (!kbps || kbps <= 0) return '0.00 KB/s'
+  if (kbps >= 1024 * 1024) {
+    return `${(kbps / (1024 * 1024)).toFixed(2)} GB/s`
+  }
+  if (kbps >= 1024) {
+    return `${(kbps / 1024).toFixed(2)} MB/s`
+  }
+  return `${kbps.toFixed(1)} KB/s`
+}
 
 const filteredProcesses = computed(() => {
   return store.processes.filter((p) => {
@@ -147,35 +163,119 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
         </div>
       </div>
 
-      <!-- 3. 磁盘挂载点与网络吞吐 -->
+      <!-- 3. 磁盘挂载点与网络吞吐 (Cell 矩阵化展示) -->
       <div class="rounded-xl bg-slate-900/90 border border-slate-800 p-4 space-y-3 flex flex-col justify-between">
-        <div class="space-y-3">
+        <div class="space-y-2.5">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-2 text-xs font-bold text-slate-100">
               <HardDrive class="w-4 h-4 text-indigo-400" />
               <span>磁盘 I/O 与实时网络吞吐</span>
             </div>
-            <span class="font-mono text-xs text-indigo-300">根分区 / ({{ currentHost.diskUsedPercent !== undefined ? `${currentHost.diskUsedPercent}%` : '--' }})</span>
+            <span class="font-mono text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+              根分区 / ({{ currentHost.diskUsedPercent !== undefined ? `${currentHost.diskUsedPercent}%` : '--' }})
+            </span>
           </div>
 
-          <div class="grid grid-cols-2 gap-2 text-xs font-mono">
-            <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
-              <div class="text-[10px] text-slate-400">网卡上行 (eth0 TX)</div>
-              <div class="text-emerald-400 font-bold mt-0.5">
-                ↑ {{ currentHost.netUpKbps ? (currentHost.netUpKbps / 1024).toFixed(2) : '0.00' }} MB/s
+          <!-- Cell 1: 磁盘用量 / 总量与容量进度条 -->
+          <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800/90 space-y-1.5">
+            <div class="flex items-center justify-between text-xs">
+              <div class="flex items-center gap-1.5 text-slate-300 font-medium text-[11px]">
+                <Database class="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span>磁盘用量 / 总量 (根分区 /)</span>
+              </div>
+              <div class="font-mono text-xs font-bold text-indigo-300">
+                {{ currentHost.diskUsedGb !== undefined && currentHost.diskTotalGb ? `${currentHost.diskUsedGb} / ${currentHost.diskTotalGb} GB` : '--' }}
+                <span class="text-[11px] font-normal text-slate-400 ml-1">({{ currentHost.diskUsedPercent ?? 0 }}%)</span>
               </div>
             </div>
-            <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
-              <div class="text-[10px] text-slate-400">网卡下行 (eth0 RX)</div>
-              <div class="text-sky-400 font-bold mt-0.5">
-                ↓ {{ currentHost.netDownKbps ? (currentHost.netDownKbps / 1024).toFixed(2) : '0.00' }} MB/s
+
+            <div class="h-1.5 rounded-full bg-slate-900 border border-slate-800 overflow-hidden">
+              <div
+                :class="[
+                  'h-full rounded-full transition-all duration-300',
+                  (currentHost.diskUsedPercent ?? 0) >= 90
+                    ? 'bg-rose-500'
+                    : (currentHost.diskUsedPercent ?? 0) >= 75
+                      ? 'bg-amber-400'
+                      : 'bg-indigo-500'
+                ]"
+                :style="{ width: `${Math.min(100, currentHost.diskUsedPercent ?? 0)}%` }"
+              />
+            </div>
+
+            <div class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+              <span>已占用: {{ currentHost.diskUsedGb !== undefined ? `${currentHost.diskUsedGb} GB` : '--' }}</span>
+              <span>
+                剩余: {{ currentHost.diskTotalGb !== undefined && currentHost.diskUsedGb !== undefined ? (Math.max(0, currentHost.diskTotalGb - currentHost.diskUsedGb)).toFixed(1) : '--' }} GB 可用
+              </span>
+            </div>
+          </div>
+
+          <!-- Cell 2-5: 4 宫格指标 Cells (网卡上下行 + 磁盘读写) -->
+          <div class="grid grid-cols-2 gap-2 text-xs font-mono">
+            <!-- 1. 网卡上行 -->
+            <div class="p-2 rounded-lg bg-slate-950 border border-slate-800/90 hover:border-slate-700/80 transition-colors space-y-1">
+              <div class="flex items-center justify-between text-[10px] text-slate-400">
+                <div class="flex items-center gap-1">
+                  <ArrowUp class="w-3 h-3 text-emerald-400 shrink-0" />
+                  <span>网卡上行 (TX)</span>
+                </div>
+                <span class="text-[9px] text-slate-500 font-sans">网络</span>
+              </div>
+              <div class="text-xs font-bold text-emerald-400 font-mono truncate">
+                ↑ {{ formatSpeed(currentHost.netUpKbps) }}
+              </div>
+            </div>
+
+            <!-- 2. 网卡下行 -->
+            <div class="p-2 rounded-lg bg-slate-950 border border-slate-800/90 hover:border-slate-700/80 transition-colors space-y-1">
+              <div class="flex items-center justify-between text-[10px] text-slate-400">
+                <div class="flex items-center gap-1">
+                  <ArrowDown class="w-3 h-3 text-sky-400 shrink-0" />
+                  <span>网卡下行 (RX)</span>
+                </div>
+                <span class="text-[9px] text-slate-500 font-sans">网络</span>
+              </div>
+              <div class="text-xs font-bold text-sky-400 font-mono truncate">
+                ↓ {{ formatSpeed(currentHost.netDownKbps) }}
+              </div>
+            </div>
+
+            <!-- 3. 磁盘读取 -->
+            <div class="p-2 rounded-lg bg-slate-950 border border-slate-800/90 hover:border-slate-700/80 transition-colors space-y-1">
+              <div class="flex items-center justify-between text-[10px] text-slate-400">
+                <div class="flex items-center gap-1">
+                  <HardDriveDownload class="w-3 h-3 text-cyan-400 shrink-0" />
+                  <span>磁盘读取 (Read)</span>
+                </div>
+                <span class="text-[9px] text-slate-500 font-sans">I/O</span>
+              </div>
+              <div class="text-xs font-bold text-cyan-300 font-mono truncate">
+                R: {{ formatSpeed(currentHost.diskReadKbps) }}
+              </div>
+            </div>
+
+            <!-- 4. 磁盘写入 -->
+            <div class="p-2 rounded-lg bg-slate-950 border border-slate-800/90 hover:border-slate-700/80 transition-colors space-y-1">
+              <div class="flex items-center justify-between text-[10px] text-slate-400">
+                <div class="flex items-center gap-1">
+                  <HardDriveUpload class="w-3 h-3 text-amber-400 shrink-0" />
+                  <span>磁盘写入 (Write)</span>
+                </div>
+                <span class="text-[9px] text-slate-500 font-sans">I/O</span>
+              </div>
+              <div class="text-xs font-bold text-amber-300 font-mono truncate">
+                W: {{ formatSpeed(currentHost.diskWriteKbps) }}
               </div>
             </div>
           </div>
         </div>
 
         <div class="flex items-center justify-between text-[11px] pt-2 border-t border-slate-800/80">
-          <span class="text-slate-400">磁盘读写: R 14.2MB/s · W 8.6MB/s</span>
+          <div class="flex items-center gap-1.5 text-slate-400 text-[10px] font-mono">
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            <span>免 Agent 实时差值推算</span>
+          </div>
           <button
             type="button"
             @click="
@@ -186,9 +286,9 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
                 openPath: '/var/log'
               })
             "
-            class="text-cyan-400 hover:underline cursor-pointer"
+            class="text-cyan-400 hover:underline cursor-pointer flex items-center gap-1 text-[11px]"
           >
-            分析大目录占用 →
+            <span>分析大目录占用 →</span>
           </button>
         </div>
       </div>

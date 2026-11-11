@@ -28,3 +28,55 @@ class TerminalAuthPayload(BaseModel):
 
 class SetCredentialPayload(BaseModel):
     password: str
+
+class WriteFilePayload(BaseModel):
+    path: str
+    content: str
+    sudo_write: bool = False
+
+class MkdirPayload(BaseModel):
+    path: str
+    mode: str = "0755"
+    sudo: bool = False
+
+class TouchFilePayload(BaseModel):
+    path: str
+    content: str = ""
+    sudo: bool = False
+
+class RenameFilePayload(BaseModel):
+    old_path: str
+    new_path: str
+    sudo: bool = False
+
+class CopyFilePayload(BaseModel):
+    src_path: str
+    dest_path: str
+    sudo: bool = False
+
+class DeleteFilesPayload(BaseModel):
+    paths: List[str]
+    sudo: bool = False
+
+class ChmodFilePayload(BaseModel):
+    path: str
+    octal: str
+    recursive: bool = False
+    owner: Optional[str] = None
+    group: Optional[str] = None
+    sudo: bool = False
+
+class ArchiveFilesPayload(BaseModel):
+    paths: List[str]
+    output_path: Optional[str] = None
+    target_dir: Optional[str] = None
+    action: str = "compress"  # "compress" | "extract"
+    sudo: bool = False
+
+class SingleDirSizePayload(BaseModel):
+    path: str
+    sudo: bool = False
+
+class DownloadBatchPayload(BaseModel):
+    paths: List[str]
+

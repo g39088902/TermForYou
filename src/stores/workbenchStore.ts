@@ -6,6 +6,7 @@ import type {
   SavedSnippet,
   ExtractedCommandCluster,
   FileEntry,
+  DiskUsageItem,
   ProcessItem,
   CronTaskItem,
   SystemdServiceItem,
@@ -72,11 +73,27 @@ export const store = reactive({
   // 右侧文件代码编辑器抽屉状态
   editorDrawer: {
     open: false,
+    loading: false,
+    saving: false,
     filePath: '',
     content: '',
     sudoWrite: false,
     reloadServiceHint: ''
   },
+
+  // 远程文件管理加载状态与目录体积分析 (ncdu)
+  filesLoading: false,
+  filesError: '' as string,
+  showHiddenFiles: true,
+  dirDiskUsage: {
+    loading: false,
+    cwd: '',
+    totalBytes: 0,
+    items: [] as DiskUsageItem[]
+  },
+  dirSizes: {} as Record<string, number>, // 缓存各目录绝对路径对应的真实磁盘占用 (bytes)
+  calculatingDirs: [] as string[], // 当前正在单独计算体积的目录路径
+  autoCalculateDirSizes: true, // 访问目录时是否自动在后台非阻塞异步测算子目录真实占用
 
   // 全局命令面板 (Cmd+K) 与参数化命令执行弹窗控制
   commandPaletteOpen: false,
@@ -672,6 +689,7 @@ export function navigateWithContext(payload: CrossModuleLinkPayload) {
 
   if (payload.openPath) {
     currentHost.value.currentCwd = payload.openPath
+    fetchRemoteDirectory(payload.openPath)
   }
 
   if (payload.editFilePath) {
@@ -994,6 +1012,8 @@ export async function probeAllHosts(silent = false) {
             host.diskUsedPercent = m.diskUsedPercent
             if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
             if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
+            if (m.diskReadKbps !== undefined) host.diskReadKbps = m.diskReadKbps
+            if (m.diskWriteKbps !== undefined) host.diskWriteKbps = m.diskWriteKbps
             host.netUpKbps = m.netUpKbps
             host.netDownKbps = m.netDownKbps
             host.uptime = m.uptime
@@ -1089,6 +1109,8 @@ export interface HostMetricsResponse {
   diskUsedPercent: number
   diskUsedGb?: number
   diskTotalGb?: number
+  diskReadKbps?: number
+  diskWriteKbps?: number
   netUpKbps: number
   netDownKbps: number
   uptime: string
@@ -1130,6 +1152,8 @@ export async function fetchHostMetrics(hostId: string) {
       targetHost.diskUsedPercent = data.diskUsedPercent
       if (data.diskUsedGb !== undefined) targetHost.diskUsedGb = data.diskUsedGb
       if (data.diskTotalGb !== undefined) targetHost.diskTotalGb = data.diskTotalGb
+      if (data.diskReadKbps !== undefined) targetHost.diskReadKbps = data.diskReadKbps
+      if (data.diskWriteKbps !== undefined) targetHost.diskWriteKbps = data.diskWriteKbps
       targetHost.netUpKbps = data.netUpKbps
       targetHost.netDownKbps = data.netDownKbps
       targetHost.uptime = data.uptime
@@ -1172,6 +1196,8 @@ export async function inspectHost(hostId: string) {
         host.diskUsedPercent = m.diskUsedPercent
         if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
         if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
+        if (m.diskReadKbps !== undefined) host.diskReadKbps = m.diskReadKbps
+        if (m.diskWriteKbps !== undefined) host.diskWriteKbps = m.diskWriteKbps
         host.netUpKbps = m.netUpKbps
         host.netDownKbps = m.netDownKbps
         host.uptime = m.uptime
@@ -1200,8 +1226,13 @@ export async function inspectHost(hostId: string) {
         if (Array.isArray(data.firewallRules) && data.firewallRules.length > 0) {
           store.firewallRules = data.firewallRules
         }
+        if (data.cwd && !host.currentCwd) {
+          host.currentCwd = data.cwd
+        }
         if (Array.isArray(data.files) && data.files.length > 0) {
-          store.files = data.files
+          if (!host.currentCwd || host.currentCwd === data.cwd) {
+            store.files = data.files
+          }
         }
       }
     }
@@ -1266,6 +1297,8 @@ export async function probeHost(hostId: string) {
           host.diskUsedPercent = m.diskUsedPercent
           if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
           if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
+          if (m.diskReadKbps !== undefined) host.diskReadKbps = m.diskReadKbps
+          if (m.diskWriteKbps !== undefined) host.diskWriteKbps = m.diskWriteKbps
           host.netUpKbps = m.netUpKbps
           host.netDownKbps = m.netDownKbps
           host.uptime = m.uptime
@@ -1283,7 +1316,12 @@ export async function probeHost(hostId: string) {
           if (Array.isArray(insp.systemdServices) && insp.systemdServices.length > 0) store.systemdServices = insp.systemdServices
           if (Array.isArray(insp.cronTasks) && insp.cronTasks.length > 0) store.cronTasks = insp.cronTasks
           if (Array.isArray(insp.firewallRules) && insp.firewallRules.length > 0) store.firewallRules = insp.firewallRules
-          if (Array.isArray(insp.files) && insp.files.length > 0) store.files = insp.files
+          if (insp.cwd && !host.currentCwd) host.currentCwd = insp.cwd
+          if (Array.isArray(insp.files) && insp.files.length > 0) {
+            if (!host.currentCwd || host.currentCwd === insp.cwd) {
+              store.files = insp.files
+            }
+          }
         }
       } else if (!isAuthFailed && host.powerStatus === 'online') {
         await inspectHost(hostId)
@@ -1381,6 +1419,8 @@ watch(
   (newId) => {
     if (newId) {
       refreshCurrentHostMetrics()
+      const h = store.hosts.find((x) => x.id === newId)
+      fetchRemoteDirectory(h?.currentCwd || '~')
     } else {
       stopMetricsPolling()
     }
@@ -1392,16 +1432,205 @@ if (typeof window !== 'undefined') {
   loadSshHostsFromBackend()
 }
 
-// 打开内置代码/配置编辑器抽屉
-export function openFileInEditor(filePath: string, reloadServiceHint = '') {
+// 实时从远端服务器拉取指定目录的文件列表
+export async function fetchRemoteDirectory(path?: string, analyzeDu = true): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+
+  const targetPath = path || currentHost.value.currentCwd || '~'
+  store.filesLoading = true
+  store.filesError = ''
+
+  try {
+    const url = `http://127.0.0.1:8000/api/v1/ssh/files/${encodeURIComponent(hostId)}/list?path=${encodeURIComponent(targetPath)}&show_hidden=${store.showHiddenFiles}`
+    const res = await fetch(url)
+    if (!res.ok) {
+      store.filesError = `读取目录失败 (HTTP ${res.status})`
+      return false
+    }
+    const data = await res.json()
+    if (data.status === 'ok') {
+      currentHost.value.currentCwd = data.cwd || targetPath
+      store.files = Array.isArray(data.files) ? data.files : []
+      if (analyzeDu && store.autoCalculateDirSizes) {
+        fetchDirectoryDiskUsage(data.cwd || targetPath)
+      }
+      return true
+    } else {
+      store.filesError = data.message || `无法访问路径: ${targetPath}`
+      showToast(store.filesError)
+      return false
+    }
+  } catch {
+    store.filesError = '无法连接后端服务读取远程目录'
+    return false
+  } finally {
+    store.filesLoading = false
+  }
+}
+
+// 实时分析远端目录各子项体积占用 (ncdu) 并批量更新目录大小映射
+export async function fetchDirectoryDiskUsage(path?: string) {
+  const hostId = store.activeHostId
+  if (!hostId) return
+
+  const targetPath = path || currentHost.value.currentCwd || '~'
+  store.dirDiskUsage.loading = true
+  try {
+    const url = `http://127.0.0.1:8000/api/v1/ssh/files/${encodeURIComponent(hostId)}/du?path=${encodeURIComponent(targetPath)}`
+    const res = await fetch(url)
+    if (!res.ok) return
+    const data = await res.json()
+    if (data.status === 'ok') {
+      store.dirDiskUsage.cwd = data.cwd || targetPath
+      store.dirDiskUsage.totalBytes = data.totalBytes || 0
+      store.dirDiskUsage.items = Array.isArray(data.items) ? data.items : []
+      if (data.dirSizes && typeof data.dirSizes === 'object') {
+        Object.assign(store.dirSizes, data.dirSizes)
+      }
+    }
+  } catch {
+    // ignore
+  } finally {
+    store.dirDiskUsage.loading = false
+  }
+}
+
+// 单独测算某个特定文件夹的真实磁盘占用 (du -sb)
+export async function fetchSingleDirSize(dirPath: string, sudo = false): Promise<number | null> {
+  const hostId = store.activeHostId
+  if (!hostId || !dirPath) return null
+
+  if (!store.calculatingDirs.includes(dirPath)) {
+    store.calculatingDirs.push(dirPath)
+  }
+
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/files/${encodeURIComponent(hostId)}/single-dir-size`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: dirPath, sudo })
+    })
+    if (!res.ok) return null
+    const data = await res.json()
+    if (data.status === 'ok' && typeof data.sizeBytes === 'number') {
+      store.dirSizes[dirPath] = data.sizeBytes
+      return data.sizeBytes
+    }
+  } catch {
+    // ignore
+  } finally {
+    const idx = store.calculatingDirs.indexOf(dirPath)
+    if (idx !== -1) {
+      store.calculatingDirs.splice(idx, 1)
+    }
+  }
+  return null
+}
+
+// 打开内置代码/配置编辑器抽屉并从远端服务器读取真实文件内容
+export async function openFileInEditor(filePath: string, reloadServiceHint = '') {
+  const hostId = store.activeHostId
   const existing = store.files.find((f) => f.path === filePath)
+
   store.editorDrawer.filePath = filePath
-  store.editorDrawer.content =
-    existing?.content ??
-    `# 自动加载远端文件: ${filePath}\n# Host: ${currentHost.value.name} (${currentHost.value.ip})\n\n`
-  store.editorDrawer.sudoWrite = filePath.startsWith('/etc') || filePath.startsWith('/lib')
+  store.editorDrawer.sudoWrite =
+    filePath.startsWith('/etc') || filePath.startsWith('/lib') || filePath.startsWith('/usr')
   store.editorDrawer.reloadServiceHint = reloadServiceHint
   store.editorDrawer.open = true
+
+  if (!hostId) {
+    store.editorDrawer.content = existing?.content ?? ''
+    return
+  }
+
+  store.editorDrawer.loading = true
+  try {
+    const url = `http://127.0.0.1:8000/api/v1/ssh/files/${encodeURIComponent(hostId)}/content?path=${encodeURIComponent(filePath)}`
+    const res = await fetch(url)
+    if (res.ok) {
+      const data = await res.json()
+      if (data.status === 'ok') {
+        store.editorDrawer.content = data.content ?? ''
+        if (data.usedSudo) {
+          store.editorDrawer.sudoWrite = true
+        }
+        if (existing) {
+          existing.content = data.content
+          if (data.permissions) existing.permissions = data.permissions
+          if (data.octal) existing.octal = data.octal
+          if (data.modifiedAt) existing.modifiedAt = data.modifiedAt
+        }
+        return
+      } else {
+        showToast(data.message || `读取文件失败: ${filePath}`)
+        if (data.isBinary) {
+          store.editorDrawer.open = false
+          return
+        }
+      }
+    }
+  } catch {
+    showToast(`拉取远程文件内容失败，显示本地缓存副本`)
+  } finally {
+    store.editorDrawer.loading = false
+  }
+
+  store.editorDrawer.content =
+    existing?.content ??
+    `# 自动加载远端文件: ${filePath}\n# Host: ${currentHost.value.name} (${currentHost.value.ip})\n`
+}
+
+// 将内置代码编辑器中的内容写回远端服务器
+export async function saveRemoteFileContent(): Promise<boolean> {
+  const hostId = store.activeHostId
+  const filePath = store.editorDrawer.filePath
+  if (!filePath) return false
+
+  if (!hostId) {
+    showToast('未连接服务器，无法保存文件')
+    return false
+  }
+
+  store.editorDrawer.saving = true
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/files/${encodeURIComponent(hostId)}/content`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: filePath,
+          content: store.editorDrawer.content,
+          sudo_write: store.editorDrawer.sudoWrite
+        })
+      }
+    )
+    const data = await res.json()
+    if (res.ok && data.status === 'ok') {
+      const existing = store.files.find((f) => f.path === filePath)
+      if (existing) {
+        existing.content = store.editorDrawer.content
+        if (data.file) {
+          existing.sizeBytes = data.file.sizeBytes
+          existing.permissions = data.file.permissions
+          existing.octal = data.file.octal
+          existing.modifiedAt = data.file.modifiedAt
+        }
+      }
+      showToast(data.message || `已成功保存远端文件: ${filePath}`)
+      fetchRemoteDirectory(currentHost.value.currentCwd, false)
+      return true
+    } else {
+      showToast(data.message || `保存失败: ${filePath}`)
+      return false
+    }
+  } catch {
+    showToast('保存失败：无法连接后端服务')
+    return false
+  } finally {
+    store.editorDrawer.saving = false
+  }
 }
 
 // 在当前终端执行一条命令并同步写入历史提炼池
@@ -1412,8 +1641,9 @@ export function executeTerminalCommand(cmd: string, switchToWorkbench = false) {
   // 检测 cd 切换目录并联动文件管理器
   if (trimmed.startsWith('cd ')) {
     const targetDir = trimmed.slice(3).trim().split(/\s+/)[0]
-    if (targetDir.startsWith('/')) {
+    if (targetDir.startsWith('/') || targetDir.startsWith('~')) {
       currentHost.value.currentCwd = targetDir
+      fetchRemoteDirectory(targetDir)
     }
   }
 

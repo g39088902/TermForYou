@@ -118,12 +118,12 @@ onUnmounted(() => {
       </div>
     </aside>
 
-    <!-- 全局操作反馈 Toast -->
+    <!-- 全局操作反馈 Toast (居顶悬浮，避免遮挡底部核心终端与命令交互中枢) -->
     <div
       v-if="store.toastMessage"
       role="status"
       aria-live="polite"
-      class="fixed bottom-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-cyan-950/95 border border-cyan-500/60 text-cyan-200 text-xs font-medium shadow-2xl flex items-center gap-2 z-50"
+      class="fixed top-5 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-cyan-950/95 border border-cyan-500/60 text-cyan-200 text-xs font-medium shadow-2xl flex items-center gap-2 z-50 transition-all pointer-events-none backdrop-blur-sm"
     >
       <CheckCircle2 class="w-4 h-4 text-emerald-400 shrink-0" />
       <span>{{ store.toastMessage }}</span>

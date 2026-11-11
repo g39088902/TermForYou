@@ -14,11 +14,8 @@ import {
   ShieldAlert,
   FolderSync,
   Terminal,
-  Sparkles,
   RefreshCw,
-  Activity,
-  Layers,
-  X
+  Layers
 } from 'lucide-vue-next'
 
 const isRefreshing = ref(false)
@@ -204,24 +201,8 @@ function formatSpeed(kbPerSec?: number): string {
       </button>
     </div>
 
-    <!-- 右侧：跨模块跳转轨迹胶囊 + 随行终端抽屉开关 -->
+    <!-- 右侧：随行终端抽屉开关 -->
     <div class="flex items-center gap-2 shrink-0 ml-3 whitespace-nowrap">
-      <div
-        v-if="store.lastJumpContext"
-        class="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-500/15 border border-cyan-500/40 text-cyan-300 text-[11px] shrink-0 whitespace-nowrap"
-      >
-        <Sparkles class="w-3 h-3" />
-        <span>联动上下文：{{ store.lastJumpContext.reason }}</span>
-        <button
-          type="button"
-          @click="store.lastJumpContext = null"
-          aria-label="清除联动提示"
-          class="hover:text-slate-100 cursor-pointer"
-        >
-          <X class="w-3 h-3" />
-        </button>
-      </div>
-
       <button
         v-if="store.activePage !== 'P1_WORKBENCH'"
         type="button"

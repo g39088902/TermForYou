@@ -1,12 +1,28 @@
 import os
 import json
 import asyncio
-from typing import Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import urllib.parse
+from typing import Optional, List
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response, Query
 from fastapi.middleware.cors import CORSMiddleware
 import asyncssh
 
-from models import SshHostInfo, TerminalAuthPayload, CreateHostPayload, SetCredentialPayload
+from models import (
+    SshHostInfo,
+    TerminalAuthPayload,
+    CreateHostPayload,
+    SetCredentialPayload,
+    WriteFilePayload,
+    MkdirPayload,
+    TouchFilePayload,
+    RenameFilePayload,
+    CopyFilePayload,
+    DeleteFilesPayload,
+    ChmodFilePayload,
+    ArchiveFilesPayload,
+    SingleDirSizePayload,
+    DownloadBatchPayload,
+)
 from ssh_config_parser import (
     parse_ssh_config,
     find_host_by_alias,
@@ -205,6 +221,173 @@ async def get_host_metrics(host_alias: str):
     """
     return await metrics_service.fetch_metrics(host_alias)
 
+# ==============================================================================
+# 远端服务器 SFTP / SSH 文件管理 API 路由组
+# ==============================================================================
+
+@app.get("/api/v1/ssh/files/{host_alias}/list")
+async def list_remote_files(host_alias: str, path: str = "~", show_hidden: bool = True):
+    """获取指定远端主机目录下的真实文件列表、权限、所有者与磁盘挂载空间"""
+    return await metrics_service.list_directory(host_alias, path=path, show_hidden=show_hidden)
+
+@app.get("/api/v1/ssh/files/{host_alias}/du")
+async def analyze_remote_disk_usage(host_alias: str, path: str = "~"):
+    """分析远端主机指定目录下各子项体积分布 (类 ncdu 磁盘占用分析)"""
+    return await metrics_service.analyze_disk_usage(host_alias, path=path)
+
+@app.get("/api/v1/ssh/files/{host_alias}/dir-sizes")
+async def get_remote_directory_sizes(host_alias: str, path: str = "~"):
+    """异步扫描指定目录下所有子目录的真实磁盘占用 (非阻塞)"""
+    return await metrics_service.analyze_disk_usage(host_alias, path=path)
+
+@app.post("/api/v1/ssh/files/{host_alias}/single-dir-size")
+async def calculate_remote_single_dir_size(host_alias: str, payload: SingleDirSizePayload):
+    """单独测算指定文件夹的真实磁盘占用 (du -sb)"""
+    return await metrics_service.calculate_single_dir_size(host_alias, path=payload.path, sudo=payload.sudo)
+
+@app.get("/api/v1/ssh/files/{host_alias}/content")
+async def read_remote_file_content(host_alias: str, path: str):
+    """读取远端文本文件内容供内置编辑器在线编辑"""
+    return await metrics_service.read_file_content(host_alias, path=path)
+
+@app.put("/api/v1/ssh/files/{host_alias}/content")
+async def write_remote_file_content(host_alias: str, payload: WriteFilePayload):
+    """将内置编辑器修改后的内容保存写回远端服务器"""
+    return await metrics_service.write_file_content(
+        host_alias,
+        path=payload.path,
+        content=payload.content,
+        sudo_write=payload.sudo_write
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/mkdir")
+async def mkdir_remote_directory(host_alias: str, payload: MkdirPayload):
+    """在远端服务器新建文件夹"""
+    return await metrics_service.create_directory(
+        host_alias,
+        path=payload.path,
+        mode=payload.mode,
+        sudo=payload.sudo
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/touch")
+async def touch_remote_file(host_alias: str, payload: TouchFilePayload):
+    """在远端服务器新建空白或带初始内容的文件"""
+    return await metrics_service.create_file(
+        host_alias,
+        path=payload.path,
+        content=payload.content,
+        sudo=payload.sudo
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/rename")
+async def rename_remote_path(host_alias: str, payload: RenameFilePayload):
+    """重命名或移动远端文件/目录"""
+    return await metrics_service.rename_path(
+        host_alias,
+        old_path=payload.old_path,
+        new_path=payload.new_path,
+        sudo=payload.sudo
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/copy")
+async def copy_remote_path(host_alias: str, payload: CopyFilePayload):
+    """复制远端文件/目录"""
+    return await metrics_service.copy_path(
+        host_alias,
+        src_path=payload.src_path,
+        dest_path=payload.dest_path,
+        sudo=payload.sudo
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/delete")
+async def delete_remote_paths(host_alias: str, payload: DeleteFilesPayload):
+    """删除远端文件或目录（带系统核心目录防误删保护）"""
+    return await metrics_service.delete_paths(
+        host_alias,
+        paths=payload.paths,
+        sudo=payload.sudo
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/chmod")
+async def chmod_remote_path(host_alias: str, payload: ChmodFilePayload):
+    """变更远端文件/目录的权限 (chmod) 及所有者 (chown)"""
+    return await metrics_service.chmod_path(
+        host_alias,
+        path=payload.path,
+        octal=payload.octal,
+        recursive=payload.recursive,
+        owner=payload.owner,
+        group=payload.group,
+        sudo=payload.sudo
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/archive")
+async def archive_remote_paths(host_alias: str, payload: ArchiveFilesPayload):
+    """远端打包压缩 (.tar.gz) 或解压归档文件"""
+    return await metrics_service.archive_paths(
+        host_alias,
+        paths=payload.paths,
+        output_path=payload.output_path,
+        target_dir=payload.target_dir,
+        action=payload.action,
+        sudo=payload.sudo
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/upload")
+async def upload_remote_file(host_alias: str, path: str, sudo: bool = False, request: Request = None):
+    """接收客户端上传的文件二进制流并写入远端服务器目标路径"""
+    body_bytes = await request.body()
+    return await metrics_service.upload_file(host_alias, remote_path=path, data=body_bytes, sudo=sudo)
+
+@app.get("/api/v1/ssh/files/{host_alias}/download")
+async def download_remote_file(host_alias: str, path: str):
+    """从远端服务器下载文件（若目标为文件夹则自动打包为 .tar.gz 流式下载）"""
+    data, filename, err = await metrics_service.download_file(host_alias, remote_path=path)
+    if err or data is None:
+        raise HTTPException(status_code=400, detail=err or "下载失败")
+    encoded_name = urllib.parse.quote(filename or "download")
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        }
+    )
+
+@app.get("/api/v1/ssh/files/{host_alias}/download-batch")
+async def download_batch_files_get(host_alias: str, paths: List[str] = Query(...)):
+    """从远端服务器批量下载文件（GET 查询参数，自动打包为 .tar.gz 流式下载）"""
+    data, filename, err = await metrics_service.download_batch(host_alias, paths=paths)
+    if err or data is None:
+        raise HTTPException(status_code=400, detail=err or "批量下载失败")
+    encoded_name = urllib.parse.quote(filename or "batch_download.tar.gz")
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        }
+    )
+
+@app.post("/api/v1/ssh/files/{host_alias}/download-batch")
+async def download_batch_files_post(host_alias: str, payload: DownloadBatchPayload):
+    """从远端服务器批量下载文件（POST JSON 请求体，自动打包为 .tar.gz 流式下载）"""
+    data, filename, err = await metrics_service.download_batch(host_alias, paths=payload.paths)
+    if err or data is None:
+        raise HTTPException(status_code=400, detail=err or "批量下载失败")
+    encoded_name = urllib.parse.quote(filename or "batch_download.tar.gz")
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_name}",
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        }
+    )
+
 @app.websocket("/ws/terminal/{host_alias}")
 async def terminal_websocket(websocket: WebSocket, host_alias: str):
     """
@@ -302,25 +485,35 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
                         pass
 
                 async def pump_ws_to_remote():
-                    try:
-                        while True:
+                    while True:
+                        try:
                             msg_raw = await websocket.receive_text()
+                        except (WebSocketDisconnect, asyncio.CancelledError):
+                            break
+                        except Exception:
+                            break
+
+                        try:
                             msg = json.loads(msg_raw)
                             action = msg.get("action")
 
                             if action == "stdin":
                                 data = msg.get("payload", "")
-                                process.stdin.write(data.encode("utf-8"))
+                                if data:
+                                    process.stdin.write(data.encode("utf-8"))
                             elif action == "resize":
-                                new_cols = msg.get("payload", {}).get("cols", cols)
-                                new_rows = msg.get("payload", {}).get("rows", rows)
-                                process.terminal_size_changed((new_cols, new_rows))
+                                payload = msg.get("payload") or {}
+                                new_cols = int(payload.get("cols", cols) or cols)
+                                new_rows = int(payload.get("rows", rows) or rows)
+                                if new_cols > 0 and new_rows > 0:
+                                    try:
+                                        process.change_terminal_size(new_cols, new_rows)
+                                    except Exception as e:
+                                        logger.warning(f"change_terminal_size failed: {e}")
                             elif action == "ping":
                                 await websocket.send_text(json.dumps({"action": "pong"}))
-                    except (WebSocketDisconnect, asyncio.CancelledError):
-                        pass
-                    except Exception:
-                        pass
+                        except Exception as e:
+                            logger.warning(f"Error handling websocket message: {e}")
 
                 remote_task = asyncio.create_task(pump_remote_to_ws())
                 ws_task = asyncio.create_task(pump_ws_to_remote())

@@ -34,6 +34,8 @@ export interface ServerHost {
   diskUsedPercent?: number
   diskTotalGb?: number
   diskUsedGb?: number
+  diskReadKbps?: number
+  diskWriteKbps?: number
   netUpKbps?: number
   netDownKbps?: number
   firewallEnabled?: boolean
@@ -100,6 +102,8 @@ export interface FileEntry {
   name: string
   path: string
   isDir: boolean
+  isSymlink?: boolean
+  linkTarget?: string | null
   sizeBytes: number
   permissions: string
   octal: string
@@ -107,6 +111,14 @@ export interface FileEntry {
   group: string
   modifiedAt: string
   content?: string
+}
+
+export interface DiskUsageItem {
+  name: string
+  path: string
+  sizeBytes: number
+  isDir: boolean
+  percent: number
 }
 
 export interface ProcessItem {

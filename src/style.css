@@ -327,6 +327,19 @@ dialog::backdrop {
   inset-inline-start: 0;
   z-index: 1;
   background-color: var(--surface-900);
+  transition: background-color 0.15s ease;
+}
+
+.table-wrapper tbody tr:hover th {
+  background-color: color-mix(in srgb, var(--surface-800) 60%, var(--surface-900));
+}
+
+.table-wrapper tbody tr.is-selected th {
+  background-color: color-mix(in srgb, var(--tint-cyan-400) 14%, var(--surface-900));
+}
+
+.table-wrapper tbody tr.is-selected:hover th {
+  background-color: color-mix(in srgb, var(--tint-cyan-400) 22%, var(--surface-900));
 }
 
 @container (width < 600px) {

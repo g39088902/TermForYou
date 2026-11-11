@@ -1,8 +1,10 @@
 import os
 import time
 import json
+import base64
+import shlex
 import asyncio
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import asyncssh
 
 from ssh_config_parser import find_host_by_alias
@@ -50,6 +52,27 @@ try:
                 d = line.split(":")[1].split()
                 rx_bytes += int(d[0])
                 tx_bytes += int(d[8])
+
+    disk_read_bytes, disk_write_bytes = 0, 0
+    if os.path.exists("/proc/diskstats"):
+        import re
+        with open("/proc/diskstats") as f_ds:
+            for line in f_ds:
+                parts = line.split()
+                if len(parts) >= 10:
+                    dev = parts[2]
+                    if re.match(r"^(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|xvd[a-z]+|mmcblk[0-9]+)$", dev):
+                        disk_read_bytes += int(parts[5]) * 512
+                        disk_write_bytes += int(parts[9]) * 512
+        if disk_read_bytes == 0 and disk_write_bytes == 0:
+            with open("/proc/diskstats") as f_ds:
+                for line in f_ds:
+                    parts = line.split()
+                    if len(parts) >= 10:
+                        dev = parts[2]
+                        if not dev.startswith(("loop", "ram", "dm-")) and (dev[-1].isalpha() or dev.endswith("n1")):
+                            disk_read_bytes += int(parts[5]) * 512
+                            disk_write_bytes += int(parts[9]) * 512
 
     with open("/proc/uptime") as f:
         uptime_sec = int(float(f.read().split()[0]))
@@ -117,6 +140,8 @@ try:
         "disk_percent": disk_percent,
         "disk_total_gb": round(disk_total / (1024**3), 1),
         "disk_used_gb": round(disk_used / (1024**3), 1),
+        "disk_read_bytes": disk_read_bytes,
+        "disk_write_bytes": disk_write_bytes,
         "cpu_idle": cpu_idle,
         "cpu_total": cpu_total,
         "cpu_cores": cpu_cores,
@@ -171,14 +196,23 @@ BEGIN {
     }
   }
   close("/proc/net/dev");
+  drb=0; dwb=0;
+  while ((getline line < "/proc/diskstats") > 0) {
+    split(line, ds);
+    if (ds[3] ~ /^(sd[a-z]+|vd[a-z]+|nvme[0-9]+n[0-9]+|xvd[a-z]+|mmcblk[0-9]+)$/) {
+      drb += ds[6] * 512;
+      dwb += ds[10] * 512;
+    }
+  }
+  close("/proc/diskstats");
   "df -k / | tail -1" | getline dfline;
   split(dfline, dfa);
   d_tot = (dfa[2]+0) / (1024*1024);
   d_used = (dfa[3]+0) / (1024*1024);
   d_pct = 0;
   if (d_tot > 0) d_pct = (d_used / d_tot) * 100;
-  printf "{\"status\":\"ok\",\"load\":[%f,%f,%f],\"uptime_sec\":%d,\"mem_used_mb\":%.1f,\"mem_total_mb\":%.1f,\"swap_used_mb\":%.1f,\"swap_total_mb\":%.1f,\"cpu_idle\":%d,\"cpu_total\":%d,\"cpu_cores\":[],\"rx_bytes\":%d,\"tx_bytes\":%d,\"disk_percent\":%.1f,\"disk_total_gb\":%.1f,\"disk_used_gb\":%.1f}\n",
-    l1, l5, l15, up_sec, (mu/1024), (mt/1024), (su/1024), (st/1024), cidle, ctot, rx, tx, d_pct, d_tot, d_used;
+  printf "{\"status\":\"ok\",\"load\":[%f,%f,%f],\"uptime_sec\":%d,\"mem_used_mb\":%.1f,\"mem_total_mb\":%.1f,\"swap_used_mb\":%.1f,\"swap_total_mb\":%.1f,\"cpu_idle\":%d,\"cpu_total\":%d,\"cpu_cores\":[],\"rx_bytes\":%d,\"tx_bytes\":%d,\"disk_percent\":%.1f,\"disk_total_gb\":%.1f,\"disk_used_gb\":%.1f,\"disk_read_bytes\":%d,\"disk_write_bytes\":%d}\n",
+    l1, l5, l15, up_sec, (mu/1024), (mt/1024), (su/1024), (st/1024), cidle, ctot, rx, tx, d_pct, d_tot, d_used, drb, dwb;
 }'
 '''
 
@@ -430,31 +464,52 @@ data['firewallRules'] = rules
 
 # 6. 当前用户家目录或 /root 下的文件列表 (Files)
 files = []
+target_dir = '/'
 try:
-    target_dir = os.path.expanduser('~')
+    import stat as stat_mod
+    try:
+        import pwd, grp
+    except Exception:
+        pwd, grp = None, None
+    target_dir = os.path.abspath(os.path.expanduser('~'))
     if not os.path.exists(target_dir): target_dir = '/'
-    for fname in os.listdir(target_dir)[:50]:
+    entries = sorted(os.listdir(target_dir), key=lambda x: x.lower())[:120]
+    for fname in entries:
         fpath = os.path.join(target_dir, fname)
-        is_dir = os.path.isdir(fpath)
         try:
-            st = os.stat(fpath)
-            mode_oct = oct(st.st_mode)[-4:]
+            is_link = os.path.islink(fpath)
+            st = os.stat(fpath) if not is_link else (os.stat(fpath) if os.path.exists(fpath) else os.lstat(fpath))
+            is_dir = stat_mod.S_ISDIR(st.st_mode)
+            perm_sym = stat_mod.filemode(st.st_mode)
+            mode_oct = '0' + oct(stat_mod.S_IMODE(st.st_mode))[-3:].zfill(3)
             mtime_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
+            owner_name = str(st.st_uid)
+            group_name = str(st.st_gid)
+            if pwd:
+                try: owner_name = pwd.getpwuid(st.st_uid).pw_name
+                except Exception: pass
+            if grp:
+                try: group_name = grp.getgrgid(st.st_gid).gr_name
+                except Exception: pass
             files.append({
                 'name': fname,
                 'path': fpath,
                 'isDir': is_dir,
+                'isSymlink': is_link,
+                'linkTarget': os.readlink(fpath) if is_link else None,
                 'sizeBytes': st.st_size if not is_dir else 4096,
-                'permissions': mode_oct,
+                'permissions': perm_sym,
                 'octal': mode_oct,
-                'owner': 'root',
-                'group': 'root',
+                'owner': owner_name,
+                'group': group_name,
                 'modifiedAt': mtime_str
             })
         except Exception:
             pass
+    files.sort(key=lambda item: (not item['isDir'], item['name'].lower()))
 except Exception:
     pass
+data['cwd'] = target_dir
 data['files'] = files
 
 print(json.dumps({'status': 'ok', 'data': data}))
@@ -591,13 +646,17 @@ class HostMetricsService:
                     "cpu_total": raw_data["cpu_total"],
                     "cpu_cores": raw_data.get("cpu_cores", []),
                     "rx_bytes": raw_data["rx_bytes"],
-                    "tx_bytes": raw_data["tx_bytes"]
+                    "tx_bytes": raw_data["tx_bytes"],
+                    "disk_read_bytes": raw_data.get("disk_read_bytes", 0),
+                    "disk_write_bytes": raw_data.get("disk_write_bytes", 0)
                 }
 
                 cpu_usage = 0
                 cpu_cores_usage = []
                 net_up_kbps = 0.0
                 net_down_kbps = 0.0
+                disk_read_kbps = 0.0
+                disk_write_kbps = 0.0
 
                 if prev_raw:
                     dt = max(0.1, now - prev_raw["time"])
@@ -626,6 +685,14 @@ class HostMetricsService:
                         net_down_kbps = round(d_rx / (1024.0 * dt), 1)
                     if d_tx >= 0:
                         net_up_kbps = round(d_tx / (1024.0 * dt), 1)
+
+                    # 磁盘读写吞吐 (KB/s 千字节每秒)
+                    d_dr = raw_data.get("disk_read_bytes", 0) - prev_raw.get("disk_read_bytes", 0)
+                    d_dw = raw_data.get("disk_write_bytes", 0) - prev_raw.get("disk_write_bytes", 0)
+                    if d_dr >= 0:
+                        disk_read_kbps = round(d_dr / (1024.0 * dt), 1)
+                    if d_dw >= 0:
+                        disk_write_kbps = round(d_dw / (1024.0 * dt), 1)
                 else:
                     # 第一次采样估算
                     cpu_usage = int(raw_data.get("load", [0])[0] * 10)
@@ -652,6 +719,8 @@ class HostMetricsService:
                     "diskUsedPercent": raw_data.get("disk_percent", 0),
                     "diskUsedGb": raw_data.get("disk_used_gb", 0),
                     "diskTotalGb": raw_data.get("disk_total_gb", 0),
+                    "diskReadKbps": disk_read_kbps,
+                    "diskWriteKbps": disk_write_kbps,
                     "netUpKbps": net_up_kbps,
                     "netDownKbps": net_down_kbps,
                     "uptime": uptime_str,
@@ -719,6 +788,7 @@ class HostMetricsService:
                     "host_alias": host_alias,
                     "auth_method": self._auth_methods.get(host_alias),
                     "timestamp": now,
+                    "cwd": inspect_data.get("cwd", "/root"),
                     "metrics": metrics,
                     "processes": inspect_data.get("processes", []),
                     "dockerContainers": inspect_data.get("dockerContainers", []),
@@ -743,6 +813,995 @@ class HostMetricsService:
             "firewallRules": [],
             "files": []
         }
+
+    async def _run_remote_json_script(self, host_alias: str, py_code: str, payload: Dict[str, Any], timeout: float = 10.0) -> Dict[str, Any]:
+        """在远端主机安全执行带 JSON 参数的 Python3 脚本并返回解析后的 JSON 结果"""
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return {
+                "status": "error",
+                "error_type": err_type or "connection_error",
+                "message": err_msg or "无法建立 SSH 连接"
+            }
+
+        b64_payload = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        full_cmd = f"python3 -c {shlex.quote(py_code)} {shlex.quote(b64_payload)}"
+        try:
+            res = await conn.run(full_cmd, timeout=timeout)
+            out_str = (res.stdout or "").strip()
+            if not out_str:
+                err_out = (res.stderr or "").strip()
+                return {"status": "error", "message": err_out or "远端命令未返回有效数据"}
+            # 取最后一行 JSON 输出
+            lines = [l for l in out_str.splitlines() if l.strip()]
+            return json.loads(lines[-1])
+        except Exception as e:
+            self._connections.pop(host_alias, None)
+            return {"status": "error", "message": str(e)}
+
+    async def list_directory(self, host_alias: str, path: str = "~", show_hidden: bool = True) -> Dict[str, Any]:
+        """列出远端指定目录的真实文件列表与权限/大小/所有者/磁盘空间信息"""
+        script = r'''
+import os, sys, json, base64, stat, time, subprocess
+try:
+    import pwd, grp
+except Exception:
+    pwd, grp = None, None
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+raw_path = (req.get('path') or '~').strip()
+show_hidden = bool(req.get('show_hidden', True))
+
+home_dir = os.path.abspath(os.path.expanduser('~'))
+if raw_path == '~' or raw_path == '':
+    target_dir = home_dir
+elif raw_path.startswith('~/'):
+    target_dir = os.path.abspath(os.path.join(home_dir, raw_path[2:]))
+else:
+    target_dir = os.path.abspath(raw_path)
+
+if not os.path.exists(target_dir):
+    print(json.dumps({'status': 'error', 'message': f'目录不存在: {target_dir}', 'cwd': target_dir}))
+    sys.exit(0)
+
+if not os.path.isdir(target_dir):
+    target_dir = os.path.dirname(target_dir) or '/'
+
+def get_file_entry(fpath, fname):
+    is_link = os.path.islink(fpath)
+    link_target = None
+    if is_link:
+        try:
+            link_target = os.readlink(fpath)
+        except Exception:
+            pass
+    st = os.stat(fpath) if (not is_link or os.path.exists(fpath)) else os.lstat(fpath)
+    is_dir = stat.S_ISDIR(st.st_mode)
+    perm_sym = stat.filemode(st.st_mode)
+    mode_oct = '0' + oct(stat.S_IMODE(st.st_mode))[-3:].zfill(3)
+    mtime_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
+    owner_name = str(st.st_uid)
+    group_name = str(st.st_gid)
+    if pwd:
+        try: owner_name = pwd.getpwuid(st.st_uid).pw_name
+        except Exception: pass
+    if grp:
+        try: group_name = grp.getgrgid(st.st_gid).gr_name
+        except Exception: pass
+    return {
+        'name': fname,
+        'path': fpath,
+        'isDir': is_dir,
+        'isSymlink': is_link,
+        'linkTarget': link_target,
+        'sizeBytes': st.st_size if not is_dir else 4096,
+        'permissions': perm_sym,
+        'octal': mode_oct,
+        'owner': owner_name,
+        'group': group_name,
+        'modifiedAt': mtime_str
+    }
+
+files = []
+try:
+    names = os.listdir(target_dir)
+    for fname in names:
+        if not show_hidden and fname.startswith('.'):
+            continue
+        fpath = os.path.join(target_dir, fname)
+        try:
+            files.append(get_file_entry(fpath, fname))
+        except Exception:
+            pass
+except PermissionError:
+    # 尝试使用 sudo ls
+    try:
+        out = subprocess.check_output(['sudo', '-n', 'python3', '-c', f"""
+import os, json, stat, time
+try:
+    import pwd, grp
+except Exception:
+    pwd, grp = None, None
+t = {repr(target_dir)}
+sh = {repr(show_hidden)}
+res = []
+for fn in os.listdir(t):
+    if not sh and fn.startswith('.'): continue
+    fp = os.path.join(t, fn)
+    try:
+        il = os.path.islink(fp)
+        st = os.stat(fp) if (not il or os.path.exists(fp)) else os.lstat(fp)
+        id_ = stat.S_ISDIR(st.st_mode)
+        res.append({{
+            'name': fn, 'path': fp, 'isDir': id_, 'isSymlink': il,
+            'linkTarget': os.readlink(fp) if il else None,
+            'sizeBytes': st.st_size if not id_ else 4096,
+            'permissions': stat.filemode(st.st_mode),
+            'octal': '0' + oct(stat.S_IMODE(st.st_mode))[-3:].zfill(3),
+            'owner': pwd.getpwuid(st.st_uid).pw_name if pwd else str(st.st_uid),
+            'group': grp.getgrgid(st.st_gid).gr_name if grp else str(st.st_gid),
+            'modifiedAt': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
+        }})
+    except Exception: pass
+print(json.dumps(res))
+"""], timeout=4).decode('utf-8')
+        files = json.loads(out.strip().splitlines()[-1])
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'权限不足，无法读取目录: {target_dir}', 'cwd': target_dir}))
+        sys.exit(0)
+except Exception as e:
+    print(json.dumps({'status': 'error', 'message': str(e), 'cwd': target_dir}))
+    sys.exit(0)
+
+files.sort(key=lambda item: (not item['isDir'], item['name'].lower()))
+
+disk_info = None
+try:
+    sv = os.statvfs(target_dir)
+    total_b = sv.f_blocks * sv.f_frsize
+    free_b = sv.f_bavail * sv.f_frsize
+    used_b = total_b - free_b
+    pct = round((used_b / total_b) * 100, 1) if total_b > 0 else 0
+    disk_info = {
+        'totalBytes': total_b,
+        'usedBytes': used_b,
+        'freeBytes': free_b,
+        'usedPercent': pct
+    }
+except Exception:
+    pass
+
+parent_dir = os.path.dirname(target_dir) if target_dir != '/' else None
+
+print(json.dumps({
+    'status': 'ok',
+    'cwd': target_dir,
+    'parent': parent_dir,
+    'home': home_dir,
+    'disk': disk_info,
+    'files': files
+}))
+'''
+        return await self._run_remote_json_script(host_alias, script, {"path": path, "show_hidden": show_hidden}, timeout=8.0)
+
+    async def analyze_disk_usage(self, host_alias: str, path: str = "~") -> Dict[str, Any]:
+        """分析指定目录下各子目录/文件的体积占比 (类 ncdu 可视化)"""
+        script = r'''
+import os, sys, json, base64, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+raw_path = (req.get('path') or '~').strip()
+home_dir = os.path.abspath(os.path.expanduser('~'))
+if raw_path == '~' or raw_path == '':
+    target_dir = home_dir
+elif raw_path.startswith('~/'):
+    target_dir = os.path.abspath(os.path.join(home_dir, raw_path[2:]))
+else:
+    target_dir = os.path.abspath(raw_path)
+
+if not os.path.isdir(target_dir):
+    target_dir = os.path.dirname(target_dir) or '/'
+
+items = []
+total_bytes = 0
+
+try:
+    # 优先使用 du -sb -x --max-depth=1 (GNU coreutils)
+    # -x (--one-file-system) 避免跨越虚拟文件系统（如 /proc, /sys, /dev），避免全盘递归与超时
+    p = subprocess.Popen(
+        ['du', '-sb', '-x', '--max-depth=1', target_dir],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True
+    )
+    out, _ = p.communicate(timeout=6)
+    if out:
+        for line in out.strip().splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[0].isdigit():
+                sz = int(parts[0])
+                p_path = os.path.abspath(parts[1].strip())
+                if p_path == target_dir:
+                    total_bytes = sz
+                else:
+                    items.append({
+                        'name': os.path.basename(p_path) or p_path,
+                        'path': p_path,
+                        'sizeBytes': sz,
+                        'isDir': os.path.isdir(p_path)
+                    })
+except Exception:
+    pass
+
+# 若 du 超时或不支持 -sb，回退尝试 Busybox du -d 1 -k -x
+if not items:
+    try:
+        p = subprocess.Popen(
+            ['du', '-d', '1', '-k', '-x', target_dir],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True
+        )
+        out, _ = p.communicate(timeout=6)
+        if out:
+            for line in out.strip().splitlines():
+                parts = line.split(None, 1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    sz = int(parts[0]) * 1024
+                    p_path = os.path.abspath(parts[1].strip())
+                    if p_path == target_dir:
+                        total_bytes = sz
+                    else:
+                        items.append({
+                            'name': os.path.basename(p_path) or p_path,
+                            'path': p_path,
+                            'sizeBytes': sz,
+                            'isDir': os.path.isdir(p_path)
+                        })
+    except Exception:
+        pass
+
+# 若仍无数据，回退至当前目录直接子项快速统计
+is_fallback = False
+if not items:
+    is_fallback = True
+    try:
+        for name in os.listdir(target_dir)[:60]:
+            fp = os.path.join(target_dir, name)
+            try:
+                st = os.lstat(fp)
+                is_d = os.path.isdir(fp)
+                items.append({
+                    'name': name,
+                    'path': fp,
+                    'sizeBytes': st.st_size if not is_d else 0,
+                    'isDir': is_d
+                })
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+sum_items = sum(x['sizeBytes'] for x in items)
+if total_bytes < sum_items:
+    total_bytes = sum_items
+
+# 重点优化：如果是降级模式，绝不将 inode 元数据 4096 冒充为真实的目录体积
+dir_sizes = {} if is_fallback else {item['path']: item['sizeBytes'] for item in items if item.get('isDir')}
+dir_sizes_by_name = {} if is_fallback else {item['name']: item['sizeBytes'] for item in items if item.get('isDir')}
+
+items.sort(key=lambda x: x['sizeBytes'], reverse=True)
+top_items = items[:8]
+for item in top_items:
+    item['percent'] = round((item['sizeBytes'] / total_bytes) * 100, 1) if total_bytes > 0 else 0
+
+print(json.dumps({
+    'status': 'ok',
+    'cwd': target_dir,
+    'totalBytes': total_bytes,
+    'items': top_items,
+    'dirSizes': dir_sizes,
+    'dirSizesByName': dir_sizes_by_name
+}))
+'''
+        return await self._run_remote_json_script(host_alias, script, {"path": path}, timeout=8.0)
+
+    async def calculate_single_dir_size(self, host_alias: str, path: str, sudo: bool = False) -> Dict[str, Any]:
+        """单独测算指定文件夹的真实磁盘占用 (du -sb / du -sk)"""
+        script = r'''
+import os, sys, json, base64, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+raw_path = (req.get('path') or '').strip()
+sudo = bool(req.get('sudo', False))
+home_dir = os.path.abspath(os.path.expanduser('~'))
+if raw_path == '~' or raw_path == '':
+    target_dir = home_dir
+elif raw_path.startswith('~/'):
+    target_dir = os.path.abspath(os.path.join(home_dir, raw_path[2:]))
+else:
+    target_dir = os.path.abspath(raw_path)
+
+if not os.path.exists(target_dir):
+    print(json.dumps({'status': 'error', 'message': f'路径不存在: {target_dir}'}))
+    sys.exit(0)
+
+size_bytes = 0
+prefix = ['sudo', '-n'] if sudo else []
+
+# 优先使用 du -sb -x (GNU)
+try:
+    cmd = prefix + ['du', '-sb', '-x', target_dir]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+    out, _ = p.communicate(timeout=6)
+    if out:
+        parts = out.strip().splitlines()[-1].split(None, 1)
+        if parts and parts[0].isdigit():
+            size_bytes = int(parts[0])
+except Exception:
+    pass
+
+# 回退尝试 du -sk -x (BusyBox / BSD)
+if size_bytes == 0:
+    try:
+        cmd = prefix + ['du', '-sk', '-x', target_dir]
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+        out, _ = p.communicate(timeout=6)
+        if out:
+            parts = out.strip().splitlines()[-1].split(None, 1)
+            if parts and parts[0].isdigit():
+                size_bytes = int(parts[0]) * 1024
+    except Exception:
+        pass
+
+print(json.dumps({
+    'status': 'ok',
+    'path': target_dir,
+    'sizeBytes': size_bytes
+}))
+'''
+        return await self._run_remote_json_script(host_alias, script, {"path": path, "sudo": sudo}, timeout=8.0)
+
+    async def read_file_content(self, host_alias: str, path: str) -> Dict[str, Any]:
+        """读取远端文本文件内容，支持无权限时自动尝试 sudo -n 读取"""
+        script = r'''
+import os, sys, json, base64, stat, time, subprocess
+try:
+    import pwd, grp
+except Exception:
+    pwd, grp = None, None
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+target_path = os.path.abspath(os.path.expanduser(req.get('path', '')))
+
+if not os.path.exists(target_path):
+    print(json.dumps({'status': 'error', 'message': f'文件不存在: {target_path}'}))
+    sys.exit(0)
+
+if os.path.isdir(target_path):
+    print(json.dumps({'status': 'error', 'message': f'目标是目录而非文件: {target_path}'}))
+    sys.exit(0)
+
+MAX_BYTES = 2 * 1024 * 1024  # 2MB 保护上限
+raw_bytes = None
+used_sudo = False
+
+try:
+    st = os.stat(target_path)
+    if st.st_size > MAX_BYTES:
+        print(json.dumps({
+            'status': 'error',
+            'message': f'文件体积过大 ({round(st.st_size / 1048576, 2)} MB > 2 MB)，请使用「下载」功能查看或通过终端 tail 查看'
+        }))
+        sys.exit(0)
+    with open(target_path, 'rb') as f:
+        raw_bytes = f.read(MAX_BYTES + 1)
+except PermissionError:
+    try:
+        raw_bytes = subprocess.check_output(['sudo', '-n', 'cat', target_path], timeout=5)
+        used_sudo = True
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'权限不足且免密 sudo 读取失败: {target_path}'}))
+        sys.exit(0)
+except Exception as e:
+    print(json.dumps({'status': 'error', 'message': str(e)}))
+    sys.exit(0)
+
+if len(raw_bytes) > MAX_BYTES:
+    print(json.dumps({'status': 'error', 'message': '文件体积超过 2MB 在线编辑上限，请下载后查看'}))
+    sys.exit(0)
+
+# 检测是否为二进制文件
+if b'\x00' in raw_bytes[:8192]:
+    print(json.dumps({
+        'status': 'error',
+        'isBinary': True,
+        'message': '检测到二进制文件，不支持文本在线编辑，请使用下载功能'
+    }))
+    sys.exit(0)
+
+content_str = raw_bytes.decode('utf-8', errors='replace')
+try:
+    st = os.stat(target_path)
+    perm_sym = stat.filemode(st.st_mode)
+    mode_oct = '0' + oct(stat.S_IMODE(st.st_mode))[-3:].zfill(3)
+    mtime_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
+    owner_name = pwd.getpwuid(st.st_uid).pw_name if pwd else str(st.st_uid)
+    group_name = grp.getgrgid(st.st_gid).gr_name if grp else str(st.st_gid)
+    size_b = st.st_size
+except Exception:
+    perm_sym = '-rw-r--r--'
+    mode_oct = '0644'
+    mtime_str = ''
+    owner_name = 'root'
+    group_name = 'root'
+    size_b = len(raw_bytes)
+
+print(json.dumps({
+    'status': 'ok',
+    'path': target_path,
+    'content': content_str,
+    'sizeBytes': size_b,
+    'permissions': perm_sym,
+    'octal': mode_oct,
+    'owner': owner_name,
+    'group': group_name,
+    'modifiedAt': mtime_str,
+    'usedSudo': used_sudo
+}))
+'''
+        return await self._run_remote_json_script(host_alias, script, {"path": path}, timeout=8.0)
+
+    async def write_file_content(self, host_alias: str, path: str, content: str, sudo_write: bool = False) -> Dict[str, Any]:
+        """将文本内容保存至远端服务器文件，支持直接写入或 sudo tee 提权写入"""
+        script = r'''
+import os, sys, json, base64, stat, time, subprocess
+try:
+    import pwd, grp
+except Exception:
+    pwd, grp = None, None
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+target_path = os.path.abspath(os.path.expanduser(req.get('path', '')))
+content = req.get('content', '')
+sudo_write = bool(req.get('sudo_write', False))
+raw_bytes = content.encode('utf-8')
+
+wrote = False
+err_detail = ''
+
+if not sudo_write:
+    try:
+        parent = os.path.dirname(target_path)
+        if parent and not os.path.exists(parent):
+            os.makedirs(parent, exist_ok=True)
+        with open(target_path, 'wb') as f:
+            f.write(raw_bytes)
+        wrote = True
+    except PermissionError as e:
+        sudo_write = True
+        err_detail = str(e)
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'写入失败: {str(e)}'}))
+        sys.exit(0)
+
+if not wrote and sudo_write:
+    try:
+        parent = os.path.dirname(target_path)
+        if parent and not os.path.exists(parent):
+            subprocess.run(['sudo', '-n', 'mkdir', '-p', parent], check=True, timeout=4)
+        p = subprocess.Popen(
+            ['sudo', '-n', 'tee', target_path],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+        _, stderr_bytes = p.communicate(input=raw_bytes, timeout=6)
+        if p.returncode != 0:
+            raise RuntimeError(stderr_bytes.decode('utf-8', errors='replace').strip() or 'sudo tee failed')
+        wrote = True
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'提权写入失败: {str(e)} ({err_detail})'}))
+        sys.exit(0)
+
+try:
+    st = os.stat(target_path)
+    perm_sym = stat.filemode(st.st_mode)
+    mode_oct = '0' + oct(stat.S_IMODE(st.st_mode))[-3:].zfill(3)
+    mtime_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
+    owner_name = pwd.getpwuid(st.st_uid).pw_name if pwd else str(st.st_uid)
+    group_name = grp.getgrgid(st.st_gid).gr_name if grp else str(st.st_gid)
+    file_entry = {
+        'name': os.path.basename(target_path),
+        'path': target_path,
+        'isDir': False,
+        'sizeBytes': st.st_size,
+        'permissions': perm_sym,
+        'octal': mode_oct,
+        'owner': owner_name,
+        'group': group_name,
+        'modifiedAt': mtime_str
+    }
+except Exception:
+    file_entry = None
+
+print(json.dumps({
+    'status': 'ok',
+    'path': target_path,
+    'file': file_entry,
+    'message': f'已成功保存文件 {target_path}'
+}))
+'''
+        return await self._run_remote_json_script(
+            host_alias,
+            script,
+            {"path": path, "content": content, "sudo_write": sudo_write},
+            timeout=10.0
+        )
+
+    async def create_directory(self, host_alias: str, path: str, mode: str = "0755", sudo: bool = False) -> Dict[str, Any]:
+        """在远端服务器新建文件夹 (mkdir -p)"""
+        script = r'''
+import os, sys, json, base64, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+target_path = os.path.abspath(os.path.expanduser(req.get('path', '')))
+mode_str = req.get('mode', '0755').strip()
+use_sudo = bool(req.get('sudo', False))
+
+try:
+    mode_int = int(mode_str[-3:], 8)
+except Exception:
+    mode_int = 0o755
+
+try:
+    if not use_sudo:
+        os.makedirs(target_path, mode=mode_int, exist_ok=True)
+        os.chmod(target_path, mode_int)
+    else:
+        subprocess.run(['sudo', '-n', 'mkdir', '-p', '-m', mode_str[-3:], target_path], check=True, timeout=5)
+    print(json.dumps({'status': 'ok', 'path': target_path, 'message': f'已创建目录 {target_path}'}))
+except PermissionError:
+    try:
+        subprocess.run(['sudo', '-n', 'mkdir', '-p', '-m', mode_str[-3:], target_path], check=True, timeout=5)
+        print(json.dumps({'status': 'ok', 'path': target_path, 'message': f'已通过 sudo 创建目录 {target_path}'}))
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'权限不足，创建目录失败: {str(e)}'}))
+except Exception as e:
+    print(json.dumps({'status': 'error', 'message': f'创建目录失败: {str(e)}'}))
+'''
+        return await self._run_remote_json_script(host_alias, script, {"path": path, "mode": mode, "sudo": sudo}, timeout=8.0)
+
+    async def create_file(self, host_alias: str, path: str, content: str = "", sudo: bool = False) -> Dict[str, Any]:
+        """在远端服务器新建文件"""
+        return await self.write_file_content(host_alias, path, content, sudo_write=sudo)
+
+    async def rename_path(self, host_alias: str, old_path: str, new_path: str, sudo: bool = False) -> Dict[str, Any]:
+        """重命名或移动远端文件/目录"""
+        script = r'''
+import os, sys, json, base64, shutil, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+old_p = os.path.abspath(os.path.expanduser(req.get('old_path', '')))
+new_p = os.path.abspath(os.path.expanduser(req.get('new_path', '')))
+use_sudo = bool(req.get('sudo', False))
+
+if not os.path.exists(old_p) and not os.path.islink(old_p):
+    print(json.dumps({'status': 'error', 'message': f'源路径不存在: {old_p}'}))
+    sys.exit(0)
+
+try:
+    if not use_sudo:
+        shutil.move(old_p, new_p)
+    else:
+        subprocess.run(['sudo', '-n', 'mv', old_p, new_p], check=True, timeout=5)
+    print(json.dumps({'status': 'ok', 'old_path': old_p, 'new_path': new_p, 'message': f'已重命名/移动至 {new_p}'}))
+except PermissionError:
+    try:
+        subprocess.run(['sudo', '-n', 'mv', old_p, new_p], check=True, timeout=5)
+        print(json.dumps({'status': 'ok', 'old_path': old_p, 'new_path': new_p, 'message': f'已通过 sudo 重命名/移动至 {new_p}'}))
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'权限不足，重命名失败: {str(e)}'}))
+except Exception as e:
+    print(json.dumps({'status': 'error', 'message': f'重命名失败: {str(e)}'}))
+'''
+        return await self._run_remote_json_script(
+            host_alias, script, {"old_path": old_path, "new_path": new_path, "sudo": sudo}, timeout=8.0
+        )
+
+    async def copy_path(self, host_alias: str, src_path: str, dest_path: str, sudo: bool = False) -> Dict[str, Any]:
+        """复制远端文件或目录"""
+        script = r'''
+import os, sys, json, base64, shutil, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+src_p = os.path.abspath(os.path.expanduser(req.get('src_path', '')))
+dest_p = os.path.abspath(os.path.expanduser(req.get('dest_path', '')))
+use_sudo = bool(req.get('sudo', False))
+
+if not os.path.exists(src_p):
+    print(json.dumps({'status': 'error', 'message': f'源路径不存在: {src_p}'}))
+    sys.exit(0)
+
+if src_p == dest_p:
+    base, ext = os.path.splitext(dest_p)
+    dest_p = f"{base}_copy{ext}"
+
+try:
+    if not use_sudo:
+        if os.path.isdir(src_p):
+            shutil.copytree(src_p, dest_p)
+        else:
+            shutil.copy2(src_p, dest_p)
+    else:
+        subprocess.run(['sudo', '-n', 'cp', '-a', src_p, dest_p], check=True, timeout=10)
+    print(json.dumps({'status': 'ok', 'src_path': src_p, 'dest_path': dest_p, 'message': f'已复制至 {dest_p}'}))
+except PermissionError:
+    try:
+        subprocess.run(['sudo', '-n', 'cp', '-a', src_p, dest_p], check=True, timeout=10)
+        print(json.dumps({'status': 'ok', 'src_path': src_p, 'dest_path': dest_p, 'message': f'已通过 sudo 复制至 {dest_p}'}))
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'权限不足，复制失败: {str(e)}'}))
+except Exception as e:
+    print(json.dumps({'status': 'error', 'message': f'复制失败: {str(e)}'}))
+'''
+        return await self._run_remote_json_script(
+            host_alias, script, {"src_path": src_path, "dest_path": dest_path, "sudo": sudo}, timeout=12.0
+        )
+
+    async def delete_paths(self, host_alias: str, paths: List[str], sudo: bool = False) -> Dict[str, Any]:
+        """安全删除远端文件或目录（内置系统根目录防误删保护）"""
+        script = r'''
+import os, sys, json, base64, shutil, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+raw_paths = req.get('paths', [])
+use_sudo = bool(req.get('sudo', False))
+
+PROTECTED = {'/', '/bin', '/boot', '/dev', '/etc', '/home', '/lib', '/lib64', '/opt', '/proc', '/root', '/run', '/sbin', '/srv', '/sys', '/tmp', '/usr', '/var'}
+
+deleted = []
+errors = []
+
+for rp in raw_paths:
+    tp = os.path.abspath(os.path.expanduser(rp))
+    if tp in PROTECTED:
+        errors.append(f'拒绝删除系统核心保护目录: {tp}')
+        continue
+    if not os.path.exists(tp) and not os.path.islink(tp):
+        errors.append(f'路径不存在: {tp}')
+        continue
+    try:
+        if not use_sudo:
+            if os.path.islink(tp) or os.path.isfile(tp):
+                os.unlink(tp)
+            elif os.path.isdir(tp):
+                shutil.rmtree(tp)
+            else:
+                os.remove(tp)
+        else:
+            subprocess.run(['sudo', '-n', 'rm', '-rf', tp], check=True, timeout=8)
+        deleted.append(tp)
+    except PermissionError:
+        try:
+            subprocess.run(['sudo', '-n', 'rm', '-rf', tp], check=True, timeout=8)
+            deleted.append(tp)
+        except Exception as e:
+            errors.append(f'{tp}: 权限不足 ({str(e)})')
+    except Exception as e:
+        errors.append(f'{tp}: {str(e)}')
+
+if errors and not deleted:
+    print(json.dumps({'status': 'error', 'message': '; '.join(errors), 'deleted': deleted}))
+else:
+    print(json.dumps({
+        'status': 'ok',
+        'deleted': deleted,
+        'errors': errors,
+        'message': f'已成功删除 {len(deleted)} 个项目'
+    }))
+'''
+        return await self._run_remote_json_script(
+            host_alias, script, {"paths": paths, "sudo": sudo}, timeout=12.0
+        )
+
+    async def chmod_path(
+        self,
+        host_alias: str,
+        path: str,
+        octal: str,
+        recursive: bool = False,
+        owner: Optional[str] = None,
+        group: Optional[str] = None,
+        sudo: bool = False
+    ) -> Dict[str, Any]:
+        """修改远端文件/目录的权限 (chmod) 与所有者 (chown)"""
+        script = r'''
+import os, sys, json, base64, stat, time, subprocess
+try:
+    import pwd, grp
+except Exception:
+    pwd, grp = None, None
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+target_path = os.path.abspath(os.path.expanduser(req.get('path', '')))
+octal_str = (req.get('octal') or '0644').strip()
+recursive = bool(req.get('recursive', False))
+owner = req.get('owner')
+group = req.get('group')
+use_sudo = bool(req.get('sudo', False))
+
+if not os.path.exists(target_path):
+    print(json.dumps({'status': 'error', 'message': f'目标不存在: {target_path}'}))
+    sys.exit(0)
+
+mode_clean = octal_str[-3:] if len(octal_str) >= 3 else octal_str
+
+def run_chmod(with_sudo):
+    cmd = (['sudo', '-n'] if with_sudo else []) + ['chmod']
+    if recursive:
+        cmd.append('-R')
+    cmd.extend([mode_clean, target_path])
+    subprocess.run(cmd, check=True, timeout=8)
+
+    if owner or group:
+        own_spec = f"{owner or ''}:{group or ''}".strip(':')
+        if own_spec:
+            chown_cmd = (['sudo', '-n'] if with_sudo else []) + ['chown']
+            if recursive:
+                chown_cmd.append('-R')
+            chown_cmd.extend([own_spec, target_path])
+            subprocess.run(chown_cmd, check=True, timeout=8)
+
+try:
+    run_chmod(use_sudo)
+except Exception as e:
+    if not use_sudo:
+        try:
+            run_chmod(True)
+        except Exception as e2:
+            print(json.dumps({'status': 'error', 'message': f'修改权限失败: {str(e2)}'}))
+            sys.exit(0)
+    else:
+        print(json.dumps({'status': 'error', 'message': f'修改权限失败: {str(e)}'}))
+        sys.exit(0)
+
+st = os.stat(target_path)
+perm_sym = stat.filemode(st.st_mode)
+mode_oct = '0' + oct(stat.S_IMODE(st.st_mode))[-3:].zfill(3)
+mtime_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))
+owner_name = pwd.getpwuid(st.st_uid).pw_name if pwd else str(st.st_uid)
+group_name = grp.getgrgid(st.st_gid).gr_name if grp else str(st.st_gid)
+
+print(json.dumps({
+    'status': 'ok',
+    'path': target_path,
+    'permissions': perm_sym,
+    'octal': mode_oct,
+    'owner': owner_name,
+    'group': group_name,
+    'modifiedAt': mtime_str,
+    'message': f'已成功将 {target_path} 权限更新为 {mode_oct} ({perm_sym})'
+}))
+'''
+        return await self._run_remote_json_script(
+            host_alias,
+            script,
+            {
+                "path": path,
+                "octal": octal,
+                "recursive": recursive,
+                "owner": owner,
+                "group": group,
+                "sudo": sudo
+            },
+            timeout=10.0
+        )
+
+    async def archive_paths(
+        self,
+        host_alias: str,
+        paths: List[str],
+        output_path: Optional[str] = None,
+        target_dir: Optional[str] = None,
+        action: str = "compress",
+        sudo: bool = False
+    ) -> Dict[str, Any]:
+        """在远端打包压缩 (.tar.gz) 或解压归档文件 (.tar.gz / .tgz / .tar / .zip)"""
+        script = r'''
+import os, sys, json, base64, time, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+raw_paths = req.get('paths', [])
+output_path = req.get('output_path')
+target_dir = req.get('target_dir')
+action = req.get('action', 'compress')
+use_sudo = bool(req.get('sudo', False))
+
+prefix = ['sudo', '-n'] if use_sudo else []
+
+if action == 'extract':
+    if not raw_paths:
+        print(json.dumps({'status': 'error', 'message': '未指定要解压的归档文件'}))
+        sys.exit(0)
+    archive_file = os.path.abspath(os.path.expanduser(raw_paths[0]))
+    if not os.path.exists(archive_file):
+        print(json.dumps({'status': 'error', 'message': f'归档文件不存在: {archive_file}'}))
+        sys.exit(0)
+    dest_dir = os.path.abspath(os.path.expanduser(target_dir)) if target_dir else os.path.dirname(archive_file)
+    try:
+        low = archive_file.lower()
+        if low.endswith('.zip'):
+            cmd = prefix + ['unzip', '-o', archive_file, '-d', dest_dir]
+        elif low.endswith('.tar.gz') or low.endswith('.tgz'):
+            cmd = prefix + ['tar', '-xzf', archive_file, '-C', dest_dir]
+        elif low.endswith('.tar.bz2') or low.endswith('.tbz2'):
+            cmd = prefix + ['tar', '-xjf', archive_file, '-C', dest_dir]
+        elif low.endswith('.tar.xz') or low.endswith('.txz'):
+            cmd = prefix + ['tar', '-xJf', archive_file, '-C', dest_dir]
+        elif low.endswith('.tar'):
+            cmd = prefix + ['tar', '-xf', archive_file, '-C', dest_dir]
+        else:
+            cmd = prefix + ['tar', '-xf', archive_file, '-C', dest_dir]
+        subprocess.run(cmd, check=True, timeout=25)
+        print(json.dumps({'status': 'ok', 'target_dir': dest_dir, 'message': f'已成功解压 {os.path.basename(archive_file)} 至 {dest_dir}'}))
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'解压失败: {str(e)}'}))
+else:
+    if not raw_paths:
+        print(json.dumps({'status': 'error', 'message': '未指定要打包的路径'}))
+        sys.exit(0)
+    abs_paths = [os.path.abspath(os.path.expanduser(p)) for p in raw_paths]
+    base_dir = os.path.dirname(abs_paths[0]) if len(abs_paths) == 1 and not os.path.isdir(abs_paths[0]) else (
+        os.path.dirname(abs_paths[0].rstrip('/')) if len(abs_paths) == 1 else os.path.commonpath(abs_paths)
+    )
+    if not base_dir:
+        base_dir = '/'
+    if not output_path:
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        first_name = os.path.basename(abs_paths[0].rstrip('/')) or 'root'
+        out_dir = os.path.dirname(abs_paths[0].rstrip('/')) if len(abs_paths) == 1 else base_dir
+        if not out_dir or out_dir == '/':
+            out_dir = '/tmp'
+        output_path = os.path.join(out_dir, f"{first_name}_{ts}.tar.gz")
+    else:
+        output_path = os.path.abspath(os.path.expanduser(output_path))
+        if not output_path.endswith('.tar.gz') and not output_path.endswith('.tgz'):
+            output_path += '.tar.gz'
+
+    rel_names = [os.path.relpath(p, base_dir) for p in abs_paths]
+    cmd = prefix + ['tar', '-czf', output_path, '-C', base_dir] + rel_names
+    try:
+        subprocess.run(cmd, check=True, timeout=30)
+        print(json.dumps({
+            'status': 'ok',
+            'output_path': output_path,
+            'message': f'已成功打包生成 {output_path}'
+        }))
+    except Exception as e:
+        print(json.dumps({'status': 'error', 'message': f'打包失败: {str(e)}'}))
+'''
+        return await self._run_remote_json_script(
+            host_alias,
+            script,
+            {
+                "paths": paths,
+                "output_path": output_path,
+                "target_dir": target_dir,
+                "action": action,
+                "sudo": sudo
+            },
+            timeout=35.0
+        )
+
+    async def upload_file(self, host_alias: str, remote_path: str, data: bytes, sudo: bool = False) -> Dict[str, Any]:
+        """通过 SSH 管道将本地上传的二进制/文本文件流式写入远端目标路径"""
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return {"status": "error", "message": err_msg or "无法建立 SSH 连接"}
+
+        q_path = shlex.quote(remote_path)
+        cmd = f"sudo -n tee {q_path} > /dev/null" if sudo else f"cat > {q_path}"
+        try:
+            res = await conn.run(cmd, input=data, encoding=None, timeout=60.0)
+            if res.exit_status != 0 and not sudo:
+                # 自动尝试 sudo tee
+                res2 = await conn.run(f"sudo -n tee {q_path} > /dev/null", input=data, encoding=None, timeout=60.0)
+                if res2.exit_status != 0:
+                    err_txt = (res2.stderr or b"").decode("utf-8", errors="replace").strip()
+                    return {"status": "error", "message": f"上传写入失败: {err_txt}"}
+            elif res.exit_status != 0:
+                err_txt = (res.stderr or b"").decode("utf-8", errors="replace").strip()
+                return {"status": "error", "message": f"上传写入失败: {err_txt}"}
+
+            return {
+                "status": "ok",
+                "path": remote_path,
+                "sizeBytes": len(data),
+                "message": f"文件已成功上传至 {remote_path} ({round(len(data) / 1024, 1)} KB)"
+            }
+        except Exception as e:
+            return {"status": "error", "message": f"上传异常: {str(e)}"}
+
+    async def download_file(self, host_alias: str, remote_path: str) -> tuple[Optional[bytes], Optional[str], Optional[str]]:
+        """从远端下载文件（若目标是文件夹则自动流式打包为 .tar.gz 下载）"""
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return None, None, err_msg or "无法建立 SSH 连接"
+
+        # 先检查目标类型
+        check_res = await self._run_remote_json_script(
+            host_alias,
+            r'''
+import os, sys, json, base64
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+p = os.path.abspath(os.path.expanduser(req.get('path', '')))
+if not os.path.exists(p):
+    print(json.dumps({'status': 'error', 'message': f'文件不存在: {p}'}))
+else:
+    print(json.dumps({
+        'status': 'ok',
+        'path': p,
+        'isDir': os.path.isdir(p),
+        'name': os.path.basename(p.rstrip('/')) or 'root'
+    }))
+''',
+            {"path": remote_path},
+            timeout=5.0
+        )
+        if check_res.get("status") != "ok":
+            return None, None, check_res.get("message", "目标文件不存在")
+
+        abs_path = check_res["path"]
+        is_dir = check_res["isDir"]
+        base_name = check_res["name"]
+        q_path = shlex.quote(abs_path)
+
+        try:
+            if is_dir:
+                parent_dir = shlex.quote(os.path.dirname(abs_path.rstrip("/")) or "/")
+                dir_name = shlex.quote(base_name)
+                cmd = f"tar -czf - -C {parent_dir} {dir_name} 2>/dev/null || sudo -n tar -czf - -C {parent_dir} {dir_name}"
+                res = await conn.run(cmd, encoding=None, timeout=60.0)
+                if res.exit_status != 0 or not res.stdout:
+                    return None, None, "打包下载目录失败"
+                return res.stdout, f"{base_name}.tar.gz", None
+            else:
+                cmd = f"cat {q_path} 2>/dev/null || sudo -n cat {q_path}"
+                res = await conn.run(cmd, encoding=None, timeout=60.0)
+                if res.exit_status != 0 and res.stdout is None:
+                    return None, None, "读取远端文件失败"
+                return res.stdout or b"", base_name, None
+        except Exception as e:
+            return None, None, str(e)
+
+    async def download_batch(self, host_alias: str, paths: List[str]) -> tuple[Optional[bytes], Optional[str], Optional[str]]:
+        """批量下载远端多个文件或文件夹（自动打包为 .tar.gz 流式传输）"""
+        if not paths:
+            return None, None, "未指定下载文件路径"
+        if len(paths) == 1:
+            return await self.download_file(host_alias, paths[0])
+
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return None, None, err_msg or "无法建立 SSH 连接"
+
+        norm_paths = [os.path.abspath(os.path.expanduser(p)) for p in paths]
+        parent_dir = os.path.dirname(norm_paths[0]) or "/"
+        all_same_parent = all((os.path.dirname(p) or "/") == parent_dir for p in norm_paths)
+
+        if all_same_parent:
+            names = [shlex.quote(os.path.basename(p)) for p in norm_paths]
+            q_parent = shlex.quote(parent_dir)
+            names_str = " ".join(names)
+            cmd = f"tar -czf - -C {q_parent} {names_str} 2>/dev/null || sudo -n tar -czf - -C {q_parent} {names_str}"
+        else:
+            q_paths = " ".join(shlex.quote(p.lstrip("/")) for p in norm_paths)
+            cmd = f"tar -czf - -C / {q_paths} 2>/dev/null || sudo -n tar -czf - -C / {q_paths}"
+
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        out_name = f"batch_{len(norm_paths)}items_{ts}.tar.gz"
+        try:
+            res = await conn.run(cmd, encoding=None, timeout=120.0)
+            if res.exit_status != 0 or not res.stdout:
+                return None, None, "批量打包下载失败或部分路径无读取权限"
+            return res.stdout, out_name, None
+        except Exception as e:
+            return None, None, str(e)
 
     async def fetch_all_metrics(self, host_aliases: list[str]) -> Dict[str, Any]:
         """并发获取多台主机的实时系统指标"""
