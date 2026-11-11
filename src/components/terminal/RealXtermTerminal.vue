@@ -9,6 +9,8 @@ import { resolvedColorScheme } from '@/stores/workbenchStore'
 const props = withDefaults(
   defineProps<{
     hostAlias: string
+    dockerContainer?: string
+    sudo?: boolean
     /** 父级为吸收取整余量而额外撑高的像素（用于还原不含余量的原始可用高度） */
     externalSlack?: number
   }>(),
@@ -29,6 +31,7 @@ const terminalEl = ref<HTMLDivElement | null>(null)
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let ws: WebSocket | null = null
+let authSent = false
 let lastSentCols = 0
 let lastSentRows = 0
 let resizeObserver: ResizeObserver | null = null
@@ -146,11 +149,14 @@ function isUserAtBottom(): boolean {
 function connectTerminal(password?: string) {
   if (!props.hostAlias) return
   if (ws) {
+    ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null
     ws.close()
     ws = null
   }
 
   isConnecting.value = true
+  isConnected.value = false
+  authSent = false
   needPassword.value = false
   authErrorMsg.value = ''
   pendingAnsiChunk = ''
@@ -166,9 +172,6 @@ function connectTerminal(password?: string) {
   ws = new WebSocket(wsUrl)
 
   ws.onopen = () => {
-    isConnecting.value = false
-    isConnected.value = true
-
     // 握手前精准测量尺寸
     handleResize()
     const cols = term ? term.cols : 80
@@ -183,16 +186,23 @@ function connectTerminal(password?: string) {
           password: password || undefined,
           cols,
           rows,
-          term: 'xterm-256color'
+          term: 'xterm-256color',
+          docker_container: props.dockerContainer || undefined,
+          sudo: props.sudo ?? false
         }
       })
     )
+    authSent = true
   }
 
   ws.onmessage = (event) => {
     try {
       const msg = JSON.parse(event.data)
-      if (msg.action === 'stdout' || msg.action === 'stderr') {
+      if (msg.action === 'ready') {
+        isConnecting.value = false
+        isConnected.value = true
+        term?.focus()
+      } else if (msg.action === 'stdout' || msg.action === 'stderr') {
         const payload = sanitizeAnsiStreamForTheme(msg.payload)
         if (payload) {
           const wasAtBottom = isUserAtBottom()
@@ -206,6 +216,7 @@ function connectTerminal(password?: string) {
           })
         }
       } else if (msg.action === 'auth_required') {
+        isConnecting.value = false
         needPassword.value = true
         authErrorMsg.value = msg.payload || '需要输入 SSH 密码以继续连接'
         term?.writeln(`\r\n\x1b[33m${authErrorMsg.value}\x1b[0m\r\n`)
@@ -285,7 +296,7 @@ function handleResize() {
       term.scrollToBottom()
     }
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (authSent && ws && ws.readyState === WebSocket.OPEN) {
       if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
         lastSentCols = term.cols
         lastSentRows = term.rows
@@ -423,6 +434,7 @@ onUnmounted(() => {
     resizeObserver = null
   }
   if (ws) {
+    ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null
     ws.close()
     ws = null
   }
@@ -441,11 +453,9 @@ watch(resolvedColorScheme, (newScheme) => {
 })
 
 watch(
-  () => props.hostAlias,
-  (newVal, oldVal) => {
-    if (newVal !== oldVal) {
-      connectTerminal()
-    }
+  () => [props.hostAlias, props.dockerContainer, props.sudo],
+  () => {
+    connectTerminal()
   }
 )
 </script>
@@ -465,6 +475,7 @@ watch(
           ]"
         />
         <span class="font-mono text-slate-300">{{ props.hostAlias }}</span>
+        <span v-if="props.dockerContainer" class="font-mono text-sky-300">/ {{ props.dockerContainer }}</span>
       </div>
 
       <div class="flex items-center gap-2">

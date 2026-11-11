@@ -58,6 +58,7 @@ src/
   services/commandExtractor.ts  历史命令提炼
   types/                TypeScript 类型
 docs/PRD.md             产品需求与进度
+docs/FEATURE_INTEGRATION_STATUS.md  前后端联调与实装状态清单
 AGENTS.md               开发规范与架构红线
 ```
 

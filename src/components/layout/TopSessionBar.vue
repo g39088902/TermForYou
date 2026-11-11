@@ -8,8 +8,6 @@ import {
   Server,
   Plus,
   Search,
-  TerminalSquare,
-  ExternalLink,
   Sun,
   Moon,
   X
@@ -117,7 +115,7 @@ function closeHostTab(hostId: string, e: MouseEvent) {
       </div>
     </div>
 
-    <!-- 右侧：白天/夜间/自动模式纯图标切换、全局 Cmd+K 命令面板 与 独立悬浮日志窗开关 -->
+    <!-- 右侧：外观切换与全局 Cmd+K 命令面板 -->
     <div class="flex items-center gap-2">
       <!-- 三态纯图标外观切换按钮：白天(太阳) / 夜间(月亮) / 自动跟随系统(太阳右下角加A) -->
       <button
@@ -155,20 +153,6 @@ function closeHostTab(hostId: string, e: MouseEvent) {
           </span>
           <span class="sr-only">当前自动模式（跟随系统），点击切换为白天模式</span>
         </span>
-      </button>
-
-      <button
-        type="button"
-        @click="store.detachedLogWindow.open = !store.detachedLogWindow.open"
-        :class="[
-          'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs border transition cursor-pointer',
-          store.detachedLogWindow.open
-            ? 'bg-purple-500/20 text-purple-300 border-purple-500/40'
-            : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-slate-200'
-        ]"
-      >
-        <ExternalLink class="w-3.5 h-3.5" />
-        <span>独立日志窗</span>
       </button>
 
       <button

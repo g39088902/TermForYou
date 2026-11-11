@@ -41,7 +41,6 @@
 | **真实 PTY 仿真与 WebSocket 通信** | 基于 `@xterm/xterm` + `FitAddon`，与后端 `asyncssh` 建立双向 WebSocket 连接，支持完整 ANSI 256 色与 UTF-8（中文、Emoji、Nerd Fonts）。 | P0 | [✅ 已实现] |
 | **自适应尺寸与末行防截断保护** | 监听容器与窗口 Resize，行数按真实 DOM 行高（≥ 18.5px）取整铺满可用高度，分数余量由状态栏/Copilot 栏吸收，并通过 `resize` 控制帧实时同步远端 Linux PTY。 | P0 | [✅ 已实现] |
 | **多服务器会话管理** | 顶部 `TopSessionBar` 支持多主机 Tab 无缝切换、状态常驻与新建/关闭终端会话。 | P0 | [✅ 已实现] |
-| **全局随行终端抽屉 (Bottom Terminal Dock)** | 在非工作台页面可随时呼出/收起底部迷你终端，切换页面不丢失当前会话状态。 | P0 | [✅ 已实现] |
 | **同窗口多终端分屏 (Split Pane)** | 支持单主机或多主机水平/垂直分屏与广播输入。 | P1 | [📋 规划中] |
 
 ### 2.2 自然语言 AI 命令生成 (AI Copilot)
@@ -75,7 +74,7 @@
 | **Mini HUD 极简微缩状态条** | 全局顶部常驻当前主机的 CPU、内存利用率进度条、延迟与状态指示。 | P0 | [✅ 已实现] |
 | **性能与进程监控 (P2)** | CPU/内存利用率、Top 运行进程表（PID、User、CPU%、MEM%、命令）、监听端口列表反查。 | P0 | [✅ 已实现] |
 | **系统服务巡检 (P6)** | 解析 Systemd 核心服务（Running/Failed 状态、是否开机自启），支持快速启停重载。 | P0 | [✅ 已实现] |
-| **Docker 容器概况 (P5)** | 获取容器列表、运行状态、镜像名称、端口映射，支持安全确认后的删除操作。 | P0 | [✅ 已实现] |
+| **Docker 容器概况 (P5)** | 获取真实容器列表、运行状态、镜像名称、端口映射；支持真实启动/停止、确认后的删除/重启，以及页面内容器 Exec 终端。停止前确认，同容器操作互斥，完成后刷新真实状态；启停/重启/Exec 的 sudo 默认关闭。点击 Exec 后页面滚到顶部终端；CPU/内存仍为占位值。 | P0 | [✅ 已实现] |
 | **安全与防火墙全景 (P8)** | 探测 UFW / Iptables 规则，提供监听端口与防火墙放行状态对照。 | P0 | [✅ 已实现] |
 | **计划任务概况 (P7)** | 提取系统与当前用户 Crontab 任务项。 | P0 | [✅ 已实现] |
 | **全屏文件管理器与代码编辑 (P3)** | 完整目录列表浏览、文件新建/重命名/删除/下载/解压缩、Chmod/Chown 权限配置，以及内置轻量代码编辑器抽屉（支持 sudo 提权保存）。 | P0 | [✅ 已实现] |
@@ -91,7 +90,7 @@
 - **主舞台 (Main Stage)**：
   - **P1 终端工作台**：终端居左下置 AI Copilot，常用/提炼侧边栏居右；
   - **P2~P8 专业可视化页**：专业图表与数据网格。
-- **随行终端抽屉 (Bottom Terminal Dock)**：在非 P1 页面时可一键呼出，操作状态跨页面无缝保持。
+- **终端入口**：SSH 交互集中在 P1 终端工作台。
 - **顶部悬浮 Toast**：操作反馈弹窗置于顶部正中，彻底杜绝遮挡终端下半区与光标视界。
 
 ### 3.2 WCAG AAA 高对比度双主题设计
@@ -122,6 +121,8 @@
 | `/api/v1/ssh/files/{host_alias}/content` | `GET`/`PUT` | 远端文件内容读取与保存（支持 sudo tee 写入） | [✅ 已实现] |
 | `/api/v1/ssh/files/{host_alias}/chmod` | `POST` | 批量/递归修改远端文件权限与所有者 | [✅ 已实现] |
 | `/api/v1/ssh/docker/{host_alias}/containers/{container}` | `DELETE` | 删除指定 Docker 容器（带名称正则校验） | [✅ 已实现] |
+| `/api/v1/ssh/docker/{host_alias}/containers/{container}/action` | `POST` | 启动/停止指定容器，JSON `{action: "start" 或 "stop", sudo: false}`；参数白名单校验，经 SSH 执行真实命令，无自动提权回退 | [✅ 已实现] |
+| `/api/v1/ssh/docker/{host_alias}/containers/{container}/restart` | `POST` | 重启指定容器，JSON `{sudo: false}`；名称/ID 校验，无自动提权回退，返回真实命令结果 | [✅ 已实现] |
 
 ### 4.2 WebSocket 协议规范 (`/ws/terminal/{host_alias}`)
 - **连接建立与认证首帧**：前端发起握手后 10 秒内发送认证帧：
@@ -132,6 +133,8 @@
   }
   ```
   后端提取配置后打开 `conn.create_process` PTY。
+- **容器 Exec**：首帧可携带 `docker_container`（容器 ID/名称）与 `sudo`（默认 `false`）。后端校验后直接在 PTY 执行 `docker exec -it -- <container> /bin/sh`；失败或退出即结束会话。容器须运行且包含 `/bin/sh`，sudo 使用 `sudo -n`，不会询问或保存提权密码。
+- **会话就绪**：PTY 成功创建后回传 `{ "action": "ready" }`，前端据此点亮连接状态。客户端先发送 `auth`，再发送尺寸同步帧；远端环境设置 `LANG=en_US.UTF-8`。
 - **尺寸同步帧**：
   ```json
   { "action": "resize", "payload": { "cols": 120, "rows": 36 } }

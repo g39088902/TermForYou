@@ -2,7 +2,6 @@ import { reactive, computed, watch } from 'vue'
 import type {
   PageId,
   ServerHost,
-  TerminalEntry,
   SavedSnippet,
   ExtractedCommandCluster,
   FileEntry,
@@ -11,6 +10,8 @@ import type {
   CronTaskItem,
   SystemdServiceItem,
   DockerContainerItem,
+  DockerActionResponse,
+  DockerContainerAction,
   FirewallRuleItem,
   CrossModuleLinkPayload
 } from '@/types'
@@ -58,9 +59,6 @@ export const store = reactive({
   openHostIds: [] as string[],
   activeHostId: '',
 
-  // 底部随行终端抽屉开关 (在 P2-P8 页面保持 SSH 会话不断开)
-  bottomTerminalOpen: false,
-
   // 终端自动同步文件管理器路径 (Follow CWD)
   followCwd: true,
 
@@ -100,19 +98,7 @@ export const store = reactive({
   paramModal: {
     open: false,
     snippet: null as SavedSnippet | null,
-    values: {} as Record<string, string>,
-    execMode: 'execute' as 'execute' | 'paste' | 'silent'
-  },
-
-  // 独立实时日志悬浮窗 (Detached Log Tailer)
-  detachedLogWindow: {
-    open: false,
-    title: 'journalctl -u nginx.service -f',
-    lines: [
-      '2026-11-10 11:05:12 [info] 1042#1042: *98121 client 183.14.29.11 connected to 0.0.0.0:443',
-      '2026-11-10 11:05:14 [info] 1042#1042: *98124 upstream response 200 in 14ms (/api/v1/health)',
-      '2026-11-10 11:06:01 [warn] 1043#1043: *98155 an upstream response is buffered to a temporary file'
-    ]
+    values: {} as Record<string, string>
   },
 
   // 服务器主机池 (初始为空，从后端 ~/.ssh/config 异步加载真实配置)
@@ -123,40 +109,6 @@ export const store = reactive({
     ? localStorage.getItem('termforyou_auto_probe') !== 'false'
     : true,
   isProbingAll: false,
-
-  // 终端会话记录
-  terminalHistory: [
-    {
-      id: 'term-1',
-      timestamp: '11:01:15',
-      cwd: '/root',
-      command: 'cd /etc/nginx && ls -la',
-      output:
-        'drwxr-xr-x 8 root root 4096 Nov 10 09:20 .\n-rw-r--r-- 1 root root 2641 Nov 09 18:12 nginx.conf\ndrwxr-xr-x 2 root root 4096 Nov 10 09:20 conf.d\n-rw-r--r-- 1 root root 1094 Nov 02 10:00 mime.types',
-      exitCode: 0,
-      durationMs: 28
-    },
-    {
-      id: 'term-2',
-      timestamp: '11:03:42',
-      cwd: '/etc/nginx',
-      command: 'ss -tulnp | grep -E "80|443|8080|6379"',
-      output:
-        'tcp   LISTEN 0      511          0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=1042,fd=6))\ntcp   LISTEN 0      511          0.0.0.0:443        0.0.0.0:*    users:(("nginx",pid=1042,fd=7))\ntcp   LISTEN 0      4096         0.0.0.0:8080       0.0.0.0:*    users:(("api-core",pid=2891,fd=3))\ntcp   LISTEN 0      511          0.0.0.0:6379       0.0.0.0:*    users:(("docker-proxy",pid=4120,fd=4))',
-      exitCode: 0,
-      durationMs: 45
-    },
-    {
-      id: 'term-3',
-      timestamp: '11:05:19',
-      cwd: '/etc/nginx',
-      command: 'docker logs -f --tail 100 nginx-gateway',
-      output:
-        '172.18.0.1 - - [10/Nov/2026:11:05:10 +0800] "GET /api/v2/cluster/nodes HTTP/2.0" 200 1842\n172.18.0.1 - - [10/Nov/2026:11:05:18 +0800] "POST /api/v2/auth/verify HTTP/2.0" 200 412',
-      exitCode: 0,
-      durationMs: 112
-    }
-  ] as TerminalEntry[],
 
   // 原始历史命令池（用于 AST 骨架提炼）
   rawHistoryLines: [...INITIAL_HISTORY_LINES],
@@ -427,52 +379,10 @@ WantedBy=multi-user.target`
     }
   ] as ProcessItem[],
 
-  // 计划任务列表 (Crontab + Systemd Timers)
-  cronTasks: [
-    {
-      id: 'cron-1',
-      engine: 'crontab',
-      title: '每日凌晨 PostgreSQL 生产库增量备份',
-      expression: '0 2 * * *',
-      naturalLanguage: '每天 02:00 准时执行',
-      command: '/opt/scripts/backup_db.sh >> /var/log/backup_db.log 2>&1',
-      scriptPath: '/opt/scripts/backup_db.sh',
-      user: 'root',
-      enabled: true,
-      lastRunAt: '2026-11-10 02:00:01',
-      lastExitCode: 0,
-      nextRuns: ['2026-11-11 02:00:00', '2026-11-12 02:00:00', '2026-11-13 02:00:00'],
-      lastOutput: '[OK] Backup finished at 20261110_020004 (size: 148.2MB)'
-    },
-    {
-      id: 'cron-2',
-      engine: 'crontab',
-      title: '每 15 分钟清理临时上传缓存目录',
-      expression: '*/15 * * * *',
-      naturalLanguage: '每 15 分钟执行一次',
-      command: 'find /tmp/uploads -name "*.tmp" -mtime +3 -delete',
-      user: 'www-data',
-      enabled: true,
-      lastRunAt: '2026-11-10 11:00:00',
-      lastExitCode: 0,
-      nextRuns: ['2026-11-10 11:15:00', '2026-11-10 11:30:00', '2026-11-10 11:45:00'],
-      lastOutput: 'Deleted 14 expired .tmp files'
-    },
-    {
-      id: 'cron-3',
-      engine: 'systemd-timer',
-      title: 'Let’s Encrypt SSL 证书自动续期检查',
-      expression: '0 3 */7 * *',
-      naturalLanguage: '每 7 天凌晨 03:00 执行',
-      command: 'certbot renew --quiet --deploy-hook "systemctl reload nginx"',
-      user: 'root',
-      enabled: true,
-      lastRunAt: '2026-11-08 03:00:12',
-      lastExitCode: 0,
-      nextRuns: ['2026-11-15 03:00:00', '2026-11-22 03:00:00'],
-      lastOutput: 'Cert not yet due for renewal; no action taken.'
-    }
-  ] as CronTaskItem[],
+  // 当前服务器的计划任务；切换时清空，等待真实巡检结果。
+  cronTasks: [] as CronTaskItem[],
+  cronTasksLoading: false,
+  cronTasksError: '',
 
   // Systemd 系统服务列表
   systemdServices: [
@@ -530,61 +440,10 @@ WantedBy=multi-user.target`
   ] as SystemdServiceItem[],
 
   // Docker 容器列表
-  dockerContainers: [
-    {
-      id: 'c-nginx-01',
-      name: 'nginx-gateway',
-      image: 'nginx:1.27-alpine',
-      status: 'running',
-      cpuPercent: 3.4,
-      memMb: 128,
-      ports: [
-        { hostPort: 80, containerPort: 80, protocol: 'tcp', firewallAllowed: true },
-        { hostPort: 443, containerPort: 443, protocol: 'tcp', firewallAllowed: true }
-      ],
-      volumes: [
-        { hostPath: '/etc/nginx/nginx.conf', containerPath: '/etc/nginx/nginx.conf' },
-        { hostPath: '/var/log/nginx', containerPath: '/var/log/nginx' }
-      ],
-      composeProject: 'gateway',
-      composePath: '/opt/stacks/gateway/docker-compose.yml',
-      createdAt: '19 天前'
-    },
-    {
-      id: 'c-redis-01',
-      name: 'redis-cache-01',
-      image: 'redis:7.4-alpine',
-      status: 'running',
-      cpuPercent: 6.8,
-      memMb: 1376,
-      ports: [
-        { hostPort: 6379, containerPort: 6379, protocol: 'tcp', firewallAllowed: true }
-      ],
-      volumes: [
-        { hostPath: '/var/lib/docker/volumes/redis_data/_data', containerPath: '/data' }
-      ],
-      composeProject: 'gateway',
-      composePath: '/opt/stacks/gateway/docker-compose.yml',
-      createdAt: '19 天前'
-    },
-    {
-      id: 'c-grafana-02',
-      name: 'grafana-dashboard',
-      image: 'grafana/grafana:11.2.0',
-      status: 'running',
-      cpuPercent: 1.9,
-      memMb: 284,
-      ports: [
-        { hostPort: 3000, containerPort: 3000, protocol: 'tcp', firewallAllowed: false }
-      ],
-      volumes: [
-        { hostPath: '/var/lib/docker/volumes/grafana_data/_data', containerPath: '/var/lib/grafana' }
-      ],
-      composeProject: 'monitoring',
-      composePath: '/opt/stacks/monitoring/docker-compose.yml',
-      createdAt: '5 天前'
-    }
-  ] as DockerContainerItem[],
+  dockerContainers: [] as DockerContainerItem[],
+  dockerContainersLoading: false,
+  dockerContainersError: '',
+  dockerContainerActions: {} as Record<string, DockerContainerAction>,
 
   // 防火墙规则列表
   firewallRules: [
@@ -745,12 +604,13 @@ export async function connectHost(hostId: string) {
   if (!store.openHostIds.includes(hostId)) {
     store.openHostIds.push(hostId)
   }
+  const hostChanged = store.activeHostId !== hostId
   store.activeHostId = hostId
   store.activePage = 'P1_WORKBENCH'
 
   // 4. 立即启动该主机的性能采集、全景数据探测与定时轮询
   startMetricsPolling()
-  inspectHost(hostId)
+  if (!hostChanged) void inspectHost(hostId)
   showToast(`已成功连接至「${host.name}」(${host.ip}) · 累计连接 ${host.connectionCount || 1} 次`)
 }
 
@@ -1174,6 +1034,39 @@ export async function fetchHostMetrics(hostId: string) {
   }
 }
 
+export async function restartDockerContainer(containerId: string, sudo = false): Promise<boolean> {
+  return controlDockerContainer(containerId, 'restart', sudo)
+}
+
+export async function controlDockerContainer(containerId: string, action: DockerContainerAction, sudo = false): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+  const label = { start: '启动', stop: '停止', restart: '重启' }[action]
+  const key = `${hostId}/${containerId}`
+  if (store.dockerContainerActions[key]) return false
+  store.dockerContainerActions[key] = action
+  try {
+    const endpoint = action === 'restart' ? 'restart' : 'action'
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/docker/${encodeURIComponent(hostId)}/containers/${encodeURIComponent(containerId)}/${endpoint}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(action === 'restart' ? { sudo } : { action, sudo }) }
+    )
+    const data: DockerActionResponse = await res.json()
+    if (!res.ok || data.status !== 'ok') {
+      showToast(`${label}失败：${data.message || data.detail || '后端服务异常'}`)
+      return false
+    }
+    showToast(data.message || `容器已${label}`)
+    if (store.activeHostId === hostId) await inspectHost(hostId)
+    return true
+  } catch {
+    showToast(`未能确认容器${label}结果，请刷新状态后再操作`)
+    return false
+  } finally {
+    delete store.dockerContainerActions[key]
+  }
+}
+
 export async function removeDockerContainer(containerName: string, force = false, removeVolumes = false): Promise<boolean> {
   const hostId = store.activeHostId
   try {
@@ -1194,14 +1087,52 @@ export async function removeDockerContainer(containerName: string, force = false
   return false
 }
 
+// 校验服务器与请求序号，防止过期巡检覆盖当前计划任务和容器列表。
+let inspectionRequestVersion = 0
+
+function beginInspectionLoad(hostId: string): number {
+  if (store.activeHostId !== hostId) return -1
+  store.cronTasksLoading = true
+  store.cronTasksError = ''
+  store.dockerContainersLoading = true
+  store.dockerContainersError = ''
+  return ++inspectionRequestVersion
+}
+
+function finishInspectionLoad(
+  hostId: string,
+  version: number,
+  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; message?: string }
+) {
+  if (version !== inspectionRequestVersion || store.activeHostId !== hostId) return
+  store.cronTasksLoading = false
+  if (data?.status === 'ok' && Array.isArray(data.cronTasks)) {
+    store.cronTasks = data.cronTasks
+    store.cronTasksError = ''
+  } else {
+    store.cronTasks = []
+    store.cronTasksError = data?.message || '未能读取当前服务器的计划任务，请重试'
+  }
+  store.dockerContainersLoading = false
+  if (data?.status === 'ok' && Array.isArray(data.dockerContainers)) {
+    store.dockerContainers = data.dockerContainers
+    store.dockerContainersError = ''
+  } else {
+    store.dockerContainers = []
+    store.dockerContainersError = data?.message || '未能读取当前服务器的容器列表，请重试'
+  }
+}
+
 export async function inspectHost(hostId: string) {
   const host = store.hosts.find((h) => h.id === hostId)
   if (!host) return
+  const inspectionVersion = beginInspectionLoad(hostId)
 
   try {
     const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/inspect/${encodeURIComponent(hostId)}`)
-    if (!res.ok) return
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
     const data = await res.json()
+    finishInspectionLoad(hostId, inspectionVersion, data)
     if (data.status === 'ok' || data.status === 'partial') {
       // 1. 同步健康与系统性能指标
       if (data.metrics && data.metrics.status === 'online') {
@@ -1234,14 +1165,8 @@ export async function inspectHost(hostId: string) {
         if (Array.isArray(data.processes) && data.processes.length > 0) {
           store.processes = data.processes
         }
-        if (Array.isArray(data.dockerContainers) && data.dockerContainers.length > 0) {
-          store.dockerContainers = data.dockerContainers
-        }
         if (Array.isArray(data.systemdServices) && data.systemdServices.length > 0) {
           store.systemdServices = data.systemdServices
-        }
-        if (Array.isArray(data.cronTasks) && data.cronTasks.length > 0) {
-          store.cronTasks = data.cronTasks
         }
         if (Array.isArray(data.firewallRules) && data.firewallRules.length > 0) {
           store.firewallRules = data.firewallRules
@@ -1257,7 +1182,7 @@ export async function inspectHost(hostId: string) {
       }
     }
   } catch {
-    // 忽略异常
+    finishInspectionLoad(hostId, inspectionVersion)
   }
 }
 
@@ -1266,6 +1191,7 @@ export async function probeHost(hostId: string) {
   if (!host) return
   showToast(`正在深度探测主机「${host.name}」开机状态及全页面数据...`)
   host.powerStatus = 'checking'
+  const inspectionVersion = beginInspectionLoad(hostId)
 
   try {
     const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/probe/${encodeURIComponent(hostId)}`, {
@@ -1273,6 +1199,7 @@ export async function probeHost(hostId: string) {
     })
     if (res.ok) {
       const probeRes = await res.json()
+      finishInspectionLoad(hostId, inspectionVersion, probeRes.inspection)
       host.powerStatus = probeRes.online ? 'online' : 'offline'
       host.pingMs = probeRes.rtt_ms ?? undefined
       host.sshBanner = probeRes.banner ?? undefined
@@ -1332,9 +1259,7 @@ export async function probeHost(hostId: string) {
 
         if (store.activeHostId === hostId) {
           if (Array.isArray(insp.processes) && insp.processes.length > 0) store.processes = insp.processes
-          if (Array.isArray(insp.dockerContainers) && insp.dockerContainers.length > 0) store.dockerContainers = insp.dockerContainers
           if (Array.isArray(insp.systemdServices) && insp.systemdServices.length > 0) store.systemdServices = insp.systemdServices
-          if (Array.isArray(insp.cronTasks) && insp.cronTasks.length > 0) store.cronTasks = insp.cronTasks
           if (Array.isArray(insp.firewallRules) && insp.firewallRules.length > 0) store.firewallRules = insp.firewallRules
           if (insp.cwd && !host.currentCwd) host.currentCwd = insp.cwd
           if (Array.isArray(insp.files) && insp.files.length > 0) {
@@ -1346,9 +1271,11 @@ export async function probeHost(hostId: string) {
       } else if (!isAuthFailed && host.powerStatus === 'online') {
         await inspectHost(hostId)
       }
+    } else {
+      finishInspectionLoad(hostId, inspectionVersion)
     }
   } catch {
-    // 忽略错误
+    finishInspectionLoad(hostId, inspectionVersion)
   }
 
   // 状态反馈提示
@@ -1433,6 +1360,21 @@ if (typeof document !== 'undefined') {
     }
   })
 }
+
+watch(
+  () => store.activeHostId,
+  (newId) => {
+    ++inspectionRequestVersion
+    store.cronTasks = []
+    store.cronTasksError = ''
+    store.cronTasksLoading = !!newId
+    store.dockerContainers = []
+    store.dockerContainersError = ''
+    store.dockerContainersLoading = !!newId
+    if (newId) void inspectHost(newId)
+  },
+  { flush: 'sync' }
+)
 
 watch(
   () => store.activeHostId,
@@ -1653,7 +1595,7 @@ export async function saveRemoteFileContent(): Promise<boolean> {
   }
 }
 
-// 在当前终端执行一条命令并同步写入历史提炼池
+// 记录界面触发的命令，并按需切换至工作台；此函数不发送 SSH 命令
 export function executeTerminalCommand(cmd: string, switchToWorkbench = false) {
   const trimmed = cmd.trim()
   if (!trimmed) return
@@ -1667,36 +1609,10 @@ export function executeTerminalCommand(cmd: string, switchToWorkbench = false) {
     }
   }
 
-  const now = new Date()
-  const timeStr = now.toTimeString().slice(0, 8)
-
-  let simulatedOutput = `[SSH ${currentHost.value.user}@${currentHost.value.ip}] Executed: ${trimmed}\n`
-  if (trimmed.startsWith('docker exec')) {
-    simulatedOutput = `root@${trimmed.split(' ').slice(-2, -1)[0] ?? 'container'}:/# # 已进入容器交互式 Shell 会话`
-  } else if (trimmed.startsWith('sudo ufw')) {
-    simulatedOutput = `Rule added\nRule added (v6)\nFirewall reloaded successfully.`
-  } else if (trimmed.startsWith('systemctl')) {
-    simulatedOutput = `[OK] ${trimmed} completed (0.04s).`
-  } else if (trimmed.startsWith('docker logs')) {
-    simulatedOutput = `2026-11-10 ${timeStr} [INFO] Stream connected — showing tail lines for ${trimmed.split(' ').pop()}\n2026-11-10 ${timeStr} [INFO] Request handled in 8.4ms (HTTP 200)`
-  }
-
-  store.terminalHistory.push({
-    id: `term-${Date.now()}`,
-    timestamp: timeStr,
-    cwd: currentHost.value.currentCwd || '~',
-    command: trimmed,
-    output: simulatedOutput,
-    exitCode: 0,
-    durationMs: Math.floor(Math.random() * 60) + 15
-  })
-
   store.rawHistoryLines.unshift(trimmed)
 
   if (switchToWorkbench) {
     store.activePage = 'P1_WORKBENCH'
-  } else if (store.activePage !== 'P1_WORKBENCH') {
-    store.bottomTerminalOpen = true
   }
 
   showToast(`已在终端执行: ${trimmed}`)
@@ -1715,7 +1631,6 @@ export function triggerSnippetExecution(snippet: SavedSnippet) {
   }
   store.paramModal.snippet = snippet
   store.paramModal.values = initVals
-  store.paramModal.execMode = 'execute'
   store.paramModal.open = true
 }
 
@@ -1823,4 +1738,3 @@ if (typeof window !== 'undefined') {
     }
   })
 }
-

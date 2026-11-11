@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import {
   store,
+  inspectHost,
   openFileInEditor,
   executeTerminalCommand,
   showToast
@@ -179,7 +180,17 @@ function addCronTask() {
     </div>
 
     <!-- 下半区：计划任务列表 -->
-    <div class="space-y-3">
+    <div class="space-y-3" :aria-busy="store.cronTasksLoading">
+      <p v-if="store.cronTasksLoading" role="status" class="text-xs text-slate-400">
+        正在读取当前服务器的计划任务…
+      </p>
+      <div v-else-if="store.cronTasksError" role="alert" class="rounded-xl border border-rose-500/30 bg-rose-500/15 p-4 text-xs text-rose-300">
+        {{ store.cronTasksError }}
+        <button type="button" class="ml-3 underline cursor-pointer" @click="inspectHost(store.activeHostId)">重试</button>
+      </div>
+      <p v-else-if="store.cronTasks.length === 0" role="status" class="rounded-xl border border-slate-800 p-4 text-xs text-slate-400">
+        当前服务器的 SSH 用户未配置 Crontab 任务。
+      </p>
       <div
         v-for="task in store.cronTasks"
         :key="task.id"

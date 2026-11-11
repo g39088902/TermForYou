@@ -339,7 +339,7 @@ if shutil.which('docker'):
                     'id': cid[:12],
                     'name': cname,
                     'image': cimg,
-                    'status': 'running' if 'running' in cstate.lower() or 'up' in cstatus.lower() else 'exited',
+                    'status': cstate.lower() if cstate.lower() in ('running', 'exited', 'restarting', 'created', 'paused', 'removing', 'dead') else 'unknown',
                     'cpuPercent': 0.8 if 'up' in cstatus.lower() else 0,
                     'memMb': 128 if 'up' in cstatus.lower() else 0,
                     'ports': parsed_ports,
@@ -529,6 +529,13 @@ data['files'] = files
 
 print(json.dumps({'status': 'ok', 'data': data}))
 " 2>/dev/null'''
+
+def docker_exec_command(container: str, sudo: bool = False) -> str:
+    """Only allow a Docker identifier and a fixed interactive shell command."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container or ""):
+        raise ValueError("非法容器名称或 ID")
+    return ("sudo -n " if sudo else "") + f"docker exec -it -- {shlex.quote(container)} /bin/sh"
+
 
 class HostMetricsService:
     def __init__(self):
@@ -853,6 +860,29 @@ class HostMetricsService:
         except Exception as e:
             self._connections.pop(host_alias, None)
             return {"status": "error", "message": str(e)}
+
+    async def restart_docker_container(self, host_alias: str, container: str, sudo: bool = False) -> Dict[str, Any]:
+        return await self.control_docker_container(host_alias, container, "restart", sudo=sudo)
+
+    async def control_docker_container(self, host_alias: str, container: str, action: str, sudo: bool = False) -> Dict[str, Any]:
+        action_labels = {"start": "启动", "stop": "停止", "restart": "重启"}
+        if action not in action_labels:
+            return {"status": "error", "message": "不支持的容器操作"}
+        label = action_labels[action]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container or ""):
+            return {"status": "error", "message": "非法容器名称或 ID"}
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return {"status": "error", "error_type": err_type, "message": err_msg or "无法建立 SSH 连接"}
+        flags = "-t 10 " if action in ("stop", "restart") else ""
+        command = ("sudo -n " if sudo else "") + f"docker {action} {flags}-- {shlex.quote(container)}"
+        try:
+            result = await conn.run(command, timeout=45)
+            if result.exit_status != 0:
+                return {"status": "error", "message": (result.stderr or result.stdout or f"容器{label}失败").strip(), "exit_code": result.exit_status}
+            return {"status": "ok", "container": container, "action": action, "message": f"已{label}容器 {container}", "exit_code": 0}
+        except Exception as exc:
+            return {"status": "error", "message": f"未能确认{label}结果：{exc}；请刷新容器状态后再操作"}
 
     async def remove_docker_container(self, host_alias: str, container: str, force: bool = False, remove_volumes: bool = False) -> Dict[str, Any]:
         """通过单次 SSH 会话删除 Docker 容器（可选强制/同时删除匿名卷）"""

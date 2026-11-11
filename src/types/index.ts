@@ -54,16 +54,6 @@ export interface ServerHost {
   authMessage?: string
 }
 
-export interface TerminalEntry {
-  id: string
-  timestamp: string
-  cwd: string
-  command: string
-  output: string
-  exitCode: number
-  durationMs: number
-}
-
 export interface CommandVariableSlot {
   name: string
   defaultValue: string
@@ -171,11 +161,29 @@ export interface SystemdServiceItem {
   recentLogs: string[]
 }
 
+export type DockerContainerAction = 'start' | 'stop' | 'restart'
+
+export interface DockerActionResponse {
+  status: 'ok' | 'error'
+  container?: string
+  message?: string
+  detail?: string
+  exit_code?: number
+  action?: DockerContainerAction
+}
+
+export interface DockerExecTarget {
+  hostAlias: string
+  containerId: string
+  name: string
+  sudo: boolean
+}
+
 export interface DockerContainerItem {
   id: string
   name: string
   image: string
-  status: 'running' | 'exited' | 'restarting'
+  status: 'running' | 'exited' | 'restarting' | 'created' | 'paused' | 'removing' | 'dead' | 'unknown'
   cpuPercent: number
   memMb: number
   ports: Array<{

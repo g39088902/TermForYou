@@ -8,7 +8,7 @@ import {
   triggerSnippetExecution,
   setExplicitColorScheme
 } from '@/stores/workbenchStore'
-import { Search, ArrowRight, Play, Copy, Sparkles, Sun, Moon } from 'lucide-vue-next'
+import { Search, ArrowRight, Play, Sparkles, Sun, Moon } from 'lucide-vue-next'
 
 const spotlightDialogRef = ref<HTMLDialogElement | null>(null)
 const paramDialogRef = ref<HTMLDialogElement | null>(null)
@@ -161,7 +161,7 @@ function confirmParameterizedCommand() {
     store.paramModal.snippet.usageCount++
   }
   store.paramModal.open = false
-  executeTerminalCommand(finalCmd, store.paramModal.execMode === 'execute')
+  executeTerminalCommand(finalCmd, true)
 }
 </script>
 
@@ -350,26 +350,7 @@ function confirmParameterizedCommand() {
       <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
         <button
           type="button"
-          @click="
-            () => {
-              store.paramModal.execMode = 'silent'
-              confirmParameterizedCommand()
-            }
-          "
-          class="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 cursor-pointer"
-        >
-          <Copy class="w-3.5 h-3.5" />
-          <span>在随行终端执行</span>
-        </button>
-
-        <button
-          type="button"
-          @click="
-            () => {
-              store.paramModal.execMode = 'execute'
-              confirmParameterizedCommand()
-            }
-          "
+          @click="confirmParameterizedCommand"
           class="flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-cyan-600 hover:bg-cyan-500 text-xs font-semibold text-white cursor-pointer"
         >
           <Play class="w-3.5 h-3.5" />

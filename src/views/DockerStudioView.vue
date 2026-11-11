@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import RealXtermTerminal from '@/components/terminal/RealXtermTerminal.vue'
+import type { DockerContainerItem, DockerExecTarget } from '@/types'
 import {
   store,
   navigateWithContext,
   executeTerminalCommand,
   showToast,
-  removeDockerContainer
+  removeDockerContainer,
+  restartDockerContainer,
+  controlDockerContainer,
+  inspectHost
 } from '@/stores/workbenchStore'
 import {
   Container,
@@ -17,8 +22,65 @@ import {
   ArrowLeftRight,
   Star,
   Trash2,
-  HardDrive
+  HardDrive,
+  Play,
+  Square,
+  Loader2,
+  X
 } from 'lucide-vue-next'
+
+const dockerSudo = ref(false)
+const execTarget = ref<DockerExecTarget | null>(null)
+const pageScrollEl = ref<HTMLDivElement | null>(null)
+
+watch(() => store.activeHostId, () => {
+  execTarget.value = null
+  dockerSudo.value = false
+}, { flush: 'sync' })
+
+onMounted(() => {
+  if (!store.dockerContainersLoading) void inspectHost(store.activeHostId)
+})
+
+function containerAction(containerId: string) {
+  return store.dockerContainerActions[`${store.activeHostId}/${containerId}`]
+}
+
+function isContainerBusy(containerId: string) {
+  return !!containerAction(containerId)
+}
+
+function containerStateLabel(container: DockerContainerItem) {
+  const action = containerAction(container.id)
+  return action ? { start: '启动中…', stop: '停止中…', restart: '重启中…' }[action] : container.status
+}
+
+function canStop(container: DockerContainerItem) {
+  return container.status === 'running' || container.status === 'restarting'
+}
+
+async function toggleContainer(container: DockerContainerItem) {
+  const action = canStop(container) ? 'stop' : 'start'
+  if (action === 'stop' && !window.confirm(`确认停止容器 ${container.name}？容器服务将停止运行。`)) return
+  if (execTarget.value?.containerId === container.id) execTarget.value = null
+  await controlDockerContainer(container.id, action, dockerSudo.value)
+}
+
+async function restartContainer(container: DockerContainerItem) {
+  if (!window.confirm(`确认重启容器 ${container.name}？容器服务会短暂中断。`)) return
+  await restartDockerContainer(container.id, dockerSudo.value)
+}
+
+async function openExec(container: DockerContainerItem) {
+  execTarget.value = {
+    hostAlias: store.activeHostId,
+    containerId: container.id,
+    name: container.name,
+    sudo: dockerSudo.value
+  }
+  await nextTick()
+  pageScrollEl.value?.scrollTo({ top: 0, behavior: 'instant' })
+}
 
 async function confirmRemove(name: string, running: boolean) {
   const msg = running
@@ -69,7 +131,22 @@ function saveDockerRunAsSnippet() {
 </script>
 
 <template>
-  <div class="p-5 space-y-5 overflow-y-auto h-full">
+  <div ref="pageScrollEl" class="p-5 space-y-5 overflow-y-auto h-full">
+    <section v-if="execTarget" class="rounded-xl border border-slate-800 overflow-hidden" aria-label="容器 Exec 终端">
+      <div class="px-4 py-2 bg-slate-900 flex items-center justify-between text-xs text-slate-100">
+        <span>容器终端 · {{ execTarget.name }} · {{ execTarget.hostAlias }} · /bin/sh</span>
+        <button type="button" @click="execTarget = null" aria-label="关闭容器终端" class="p-1 rounded hover:bg-slate-800 cursor-pointer"><X class="w-4 h-4" /></button>
+      </div>
+      <div class="h-[420px] flex min-h-0">
+        <RealXtermTerminal
+          :key="`${execTarget.hostAlias}/${execTarget.containerId}/${execTarget.sudo}`"
+          :host-alias="execTarget.hostAlias"
+          :docker-container="execTarget.containerId"
+          :sudo="execTarget.sudo"
+          class="flex-1 min-h-0 min-w-0"
+        />
+      </div>
+    </section>
     <!-- 顶部：容器全生命周期管理列表 -->
     <div class="rounded-xl bg-slate-900/90 border border-slate-800 overflow-hidden">
       <div class="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
@@ -82,8 +159,21 @@ function saveDockerRunAsSnippet() {
             容器实例运行状态、资源占用与端口映射管理。
           </p>
         </div>
+        <div class="flex items-center gap-3 text-xs text-slate-300">
+          <label class="flex items-center gap-1.5 cursor-pointer">
+            <input v-model="dockerSudo" type="checkbox" />
+            使用 sudo 启停 / 重启 / Exec
+          </label>
+          <button type="button" :disabled="store.dockerContainersLoading" @click="inspectHost(store.activeHostId)" class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 cursor-pointer">刷新</button>
+        </div>
       </div>
 
+      <p v-if="store.dockerContainersLoading" role="status" class="p-4 text-xs text-slate-400">正在读取当前服务器的容器列表…</p>
+      <div v-else-if="store.dockerContainersError" role="alert" class="m-4 p-3 rounded bg-rose-500/15 text-xs text-rose-300">
+        {{ store.dockerContainersError }}
+        <button type="button" @click="inspectHost(store.activeHostId)" class="ml-3 underline cursor-pointer">重试</button>
+      </div>
+      <p v-else-if="store.dockerContainers.length === 0" role="status" class="p-4 text-xs text-slate-400">当前服务器未返回容器。</p>
       <div tabindex="0" role="region" aria-labelledby="docker-table-heading" class="table-wrapper">
         <table class="text-left text-xs" style="--label-2: '资源占用'; --label-3: '端口映射与防火墙'; --label-4: '存储卷挂载'">
           <thead class="bg-slate-950 text-slate-400 text-[11px] border-b border-slate-800">
@@ -106,7 +196,7 @@ function saveDockerRunAsSnippet() {
             >
               <th class="py-3 px-3 font-medium text-slate-100 align-top text-left border-b border-slate-800">
                 <div class="flex items-center gap-2">
-                  <span class="w-2 h-2 rounded-full bg-emerald-400" />
+                  <span :class="['w-2 h-2 rounded-full', c.status === 'running' ? 'bg-emerald-400' : 'bg-amber-400']" />
                   <span class="font-bold">{{ c.name }}</span>
                   <span
                     v-if="c.composeProject"
@@ -119,6 +209,7 @@ function saveDockerRunAsSnippet() {
               </th>
 
               <td class="py-3 px-3 font-mono align-top border-b border-slate-800">
+                <div class="text-slate-300">{{ containerStateLabel(c) }}</div>
                 <div class="text-emerald-400">CPU {{ c.cpuPercent }}%</div>
                 <div class="text-slate-400 text-[11px]">MEM {{ c.memMb }} MB</div>
                 <div v-if="c.diskUsage" class="flex items-center gap-1 text-sky-300 text-[11px]" title="容器可写层占用 (virtual 含镜像层)">
@@ -186,28 +277,48 @@ function saveDockerRunAsSnippet() {
                 </div>
               </td>
 
-              <!-- 容器动作：一键进入容器终端 / 重启 -->
+              <!-- 容器动作：启停 / Exec / 重启 / 删除 -->
               <td class="py-3 px-3 text-right align-top whitespace-nowrap border-b border-slate-800">
                 <div class="inline-flex items-center gap-1.5 whitespace-nowrap">
                   <button
                     type="button"
-                    @click="executeTerminalCommand(`docker exec -it ${c.name} /bin/sh`, true)"
-                    class="flex items-center gap-1 whitespace-nowrap shrink-0 px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-medium cursor-pointer"
+                    @click="toggleContainer(c)"
+                    :disabled="isContainerBusy(c.id) || store.dockerContainersLoading || !['running', 'restarting', 'exited', 'created'].includes(c.status)"
+                    :aria-label="`${canStop(c) ? '停止' : '启动'}容器 ${c.name}`"
+                    :class="[
+                      'flex items-center gap-1 px-2.5 py-1 rounded border text-[11px] font-medium disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer',
+                      canStop(c) ? 'bg-amber-500/15 text-amber-300 border-amber-500/30 hover:bg-amber-500/25' : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                    ]"
+                  >
+                    <Loader2 v-if="isContainerBusy(c.id)" class="w-3 h-3 animate-spin" />
+                    <Square v-else-if="canStop(c)" class="w-3 h-3" />
+                    <Play v-else class="w-3 h-3" />
+                    <span>{{ containerAction(c.id) === 'start' ? '启动中…' : containerAction(c.id) === 'stop' ? '停止中…' : canStop(c) ? '停止' : '启动' }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    @click="openExec(c)"
+                    :disabled="c.status !== 'running' || isContainerBusy(c.id) || store.dockerContainersLoading"
+                    :aria-label="`进入容器 ${c.name} 终端`"
+                    class="flex items-center gap-1 whitespace-nowrap shrink-0 px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[11px] font-medium cursor-pointer"
                   >
                     <Terminal class="w-3 h-3" />
                     <span>Exec 终端</span>
                   </button>
                   <button
                     type="button"
-                    @click="executeTerminalCommand(`docker restart ${c.name}`)"
-                    class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 cursor-pointer"
+                    @click="restartContainer(c)"
+                    :disabled="isContainerBusy(c.id) || store.dockerContainersLoading"
+                    :aria-label="`重启容器 ${c.name}`"
+                    class="p-1.5 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 cursor-pointer"
                     title="重启容器"
                   >
-                    <RotateCw class="w-3.5 h-3.5" />
+                    <RotateCw :class="['w-3.5 h-3.5', containerAction(c.id) === 'restart' ? 'animate-spin' : '']" />
                   </button>
                   <button
                     type="button"
                     @click="confirmRemove(c.name, c.status === 'running')"
+                    :disabled="isContainerBusy(c.id) || store.dockerContainersLoading"
                     class="p-1.5 rounded bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 cursor-pointer"
                     title="删除容器"
                   >

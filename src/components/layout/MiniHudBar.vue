@@ -13,7 +13,6 @@ import {
   ShieldCheck,
   ShieldAlert,
   FolderSync,
-  Terminal,
   RefreshCw,
   Layers
 } from 'lucide-vue-next'
@@ -198,24 +197,6 @@ function formatSpeed(kbPerSec?: number): string {
       >
         <FolderSync class="w-3.5 h-3.5 text-amber-400" />
         <span>CWD: {{ currentHost.currentCwd || '--' }}</span>
-      </button>
-    </div>
-
-    <!-- 右侧：随行终端抽屉开关 -->
-    <div class="flex items-center gap-2 shrink-0 ml-3 whitespace-nowrap">
-      <button
-        v-if="store.activePage !== 'P1_WORKBENCH'"
-        type="button"
-        @click="store.bottomTerminalOpen = !store.bottomTerminalOpen"
-        :class="[
-          'flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-medium transition cursor-pointer shrink-0 whitespace-nowrap',
-          store.bottomTerminalOpen
-            ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50'
-            : 'bg-slate-950 text-slate-300 border-slate-800 hover:bg-slate-800'
-        ]"
-      >
-        <Terminal class="w-3.5 h-3.5 text-cyan-400" />
-        <span>随行终端 ({{ store.bottomTerminalOpen ? '已展开' : 'Ctrl+`' }})</span>
       </button>
     </div>
   </div>

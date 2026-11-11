@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import logging
 import urllib.parse
 from typing import Optional, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response, Query
@@ -10,6 +11,8 @@ import asyncssh
 from models import (
     SshHostInfo,
     TerminalAuthPayload,
+    DockerRestartPayload,
+    DockerActionPayload,
     CreateHostPayload,
     SetCredentialPayload,
     WriteFilePayload,
@@ -30,11 +33,12 @@ from ssh_config_parser import (
     delete_host_from_ssh_config,
     add_host_to_ssh_config,
 )
-from metrics_collector import metrics_service
+from metrics_collector import metrics_service, docker_exec_command
 from db import init_db, get_all_host_stats, record_manual_connection, delete_host_stat
 from probe_service import probe_single_host, probe_all_hosts_concurrently
 
 app = FastAPI(title="TermForYou SSH Backend", version="1.0.0")
+logger = logging.getLogger(__name__)
 
 @app.on_event("startup")
 def on_startup():
@@ -393,6 +397,20 @@ async def download_batch_files_post(host_alias: str, payload: DownloadBatchPaylo
         }
     )
 
+@app.post("/api/v1/ssh/docker/{host_alias}/containers/{container}/restart")
+async def restart_docker_container_endpoint(host_alias: str, container: str, payload: DockerRestartPayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.restart_docker_container(host_alias, container, sudo=payload.sudo)
+
+
+@app.post("/api/v1/ssh/docker/{host_alias}/containers/{container}/action")
+async def control_docker_container_endpoint(host_alias: str, container: str, payload: DockerActionPayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.control_docker_container(host_alias, container, payload.action, sudo=payload.sudo)
+
+
 @app.websocket("/ws/terminal/{host_alias}")
 async def terminal_websocket(websocket: WebSocket, host_alias: str):
     """
@@ -417,14 +435,16 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
     try:
         init_raw = await asyncio.wait_for(websocket.receive_text(), timeout=10.0)
         init_json = json.loads(init_raw)
-        if init_json.get("action") == "auth":
-            auth_payload = init_json.get("payload", {})
-            auth_data = TerminalAuthPayload(**auth_payload)
-            cols = auth_data.cols
-            rows = auth_data.rows
-            term = auth_data.term
+        if init_json.get("action") != "auth":
+            raise ValueError("首帧必须为 auth")
+        auth_data = TerminalAuthPayload(**init_json.get("payload", {}))
+        cols = auth_data.cols
+        rows = auth_data.rows
+        term = auth_data.term
     except Exception:
-        pass
+        await websocket.send_json({"action": "stderr", "payload": "终端认证参数无效或超时，请重新连接。\r\n"})
+        await websocket.close(code=1008)
+        return
 
     # 准备 asyncssh 连接参数
     conn_kwargs = {
@@ -437,6 +457,8 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
     if auth_data and auth_data.password:
         conn_kwargs["password"] = auth_data.password
         metrics_service.set_credential(host_alias, auth_data.password)
+    elif host_alias in metrics_service._credentials:
+        conn_kwargs["password"] = metrics_service._credentials[host_alias]
 
     # 如果配置了 IdentityFile 并且文件存在
     client_keys = []
@@ -468,11 +490,15 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
             }))
 
             # 创建 PTY 伪终端交互式会话
+            command = docker_exec_command(auth_data.docker_container, auth_data.sudo) if auth_data.docker_container else None
             async with conn.create_process(
+                command,
                 term_type=term,
                 term_size=(cols, rows),
+                env={"LANG": "en_US.UTF-8"},
                 encoding=None # 原始字节流
             ) as process:
+                await websocket.send_json({"action": "ready"})
 
                 async def pump_remote_to_ws():
                     try:
@@ -529,6 +555,10 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
                 )
                 for task in pending:
                     task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if remote_task in done:
+                    await process.wait_closed()
+                    await websocket.send_json({"action": "stdout", "payload": f"\r\n会话已结束 (Exit {process.exit_status})\r\n"})
 
     except asyncssh.PermissionDenied as e:
         await websocket.send_text(json.dumps({

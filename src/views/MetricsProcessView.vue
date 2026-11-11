@@ -153,13 +153,6 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
 
         <div class="text-[11px] text-slate-400 pt-2 border-t border-slate-800/80 flex items-center justify-between">
           <span>支持点击下方进程表按 RSS 内存排序</span>
-          <button
-            type="button"
-            @click="executeTerminalCommand('free -h && vmstat 1 3')"
-            class="text-cyan-400 hover:underline cursor-pointer"
-          >
-            在随行终端运行 free -h
-          </button>
         </div>
       </div>
 

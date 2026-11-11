@@ -1,5 +1,5 @@
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import List, Optional, Literal
+from pydantic import BaseModel, Field
 
 class SshHostInfo(BaseModel):
     id: str                 # 唯一标识（通常与 host_alias 相同）
@@ -25,6 +25,14 @@ class TerminalAuthPayload(BaseModel):
     cols: int = 120
     rows: int = 34
     term: str = "xterm-256color"
+    docker_container: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    sudo: bool = False
+
+class DockerRestartPayload(BaseModel):
+    sudo: bool = False
+
+class DockerActionPayload(DockerRestartPayload):
+    action: Literal["start", "stop"]
 
 class SetCredentialPayload(BaseModel):
     password: str
@@ -79,4 +87,3 @@ class SingleDirSizePayload(BaseModel):
 
 class DownloadBatchPayload(BaseModel):
     paths: List[str]
-
