@@ -6,20 +6,41 @@ import '@xterm/xterm/css/xterm.css'
 import { KeyRound, RefreshCw } from 'lucide-vue-next'
 import { resolvedColorScheme } from '@/stores/workbenchStore'
 
-const props = defineProps<{
-  hostAlias: string
+const props = withDefaults(
+  defineProps<{
+    hostAlias: string
+    /** 父级为吸收取整余量而额外撑高的像素（用于还原不含余量的原始可用高度） */
+    externalSlack?: number
+  }>(),
+  { externalSlack: 0 }
+)
+
+const emit = defineEmits<{
+  /** 终端吸附到整行后剩余的非整行高度（px），由父级的上下可伸缩组件承担 */
+  (e: 'slack', value: { top: number; bottom: number }): void
 }>()
+
+const HEADER_BASE_HEIGHT = 28
+const rootEl = ref<HTMLDivElement | null>(null)
+const headerExtra = ref(0)
+const terminalHeight = ref<number | null>(null)
 
 const terminalEl = ref<HTMLDivElement | null>(null)
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
 let ws: WebSocket | null = null
+let lastSentCols = 0
+let lastSentRows = 0
+let resizeObserver: ResizeObserver | null = null
 
 const isConnecting = ref(false)
 const isConnected = ref(false)
 const needPassword = ref(false)
 const passwordInput = ref('')
 const authErrorMsg = ref('')
+
+const currentCols = ref(80)
+const currentRows = ref(24)
 
 // 暗色主题配色（深空灰黑 + 高对比亮青/绿光标）
 const DARK_TERMINAL_THEME: ITheme = {
@@ -112,6 +133,16 @@ function sanitizeAnsiStreamForTheme(text: string): string {
   })
 }
 
+function isUserAtBottom(): boolean {
+  if (!term) return true
+  try {
+    const buffer = term.buffer.active
+    return buffer.viewportY >= buffer.baseY
+  } catch {
+    return true
+  }
+}
+
 function connectTerminal(password?: string) {
   if (!props.hostAlias) return
   if (ws) {
@@ -123,6 +154,8 @@ function connectTerminal(password?: string) {
   needPassword.value = false
   authErrorMsg.value = ''
   pendingAnsiChunk = ''
+  lastSentCols = 0
+  lastSentRows = 0
 
   if (term) {
     term.reset()
@@ -136,9 +169,13 @@ function connectTerminal(password?: string) {
     isConnecting.value = false
     isConnected.value = true
 
-    // 发送第一帧初始化与认证数据
-    const cols = term ? term.cols : 120
-    const rows = term ? term.rows : 34
+    // 握手前精准测量尺寸
+    handleResize()
+    const cols = term ? term.cols : 80
+    const rows = term ? term.rows : 24
+    lastSentCols = cols
+    lastSentRows = rows
+
     ws?.send(
       JSON.stringify({
         action: 'auth',
@@ -158,7 +195,15 @@ function connectTerminal(password?: string) {
       if (msg.action === 'stdout' || msg.action === 'stderr') {
         const payload = sanitizeAnsiStreamForTheme(msg.payload)
         if (payload) {
-          term?.write(payload)
+          const wasAtBottom = isUserAtBottom()
+          term?.write(payload, () => {
+            // 系统终端标准体验：
+            // 若用户当前处于最底部，新输出自动跟随滚动到底部；
+            // 若用户主动往上滚使输入区居中或查看历史日志，绝不强行拽到底部打断用户
+            if (wasAtBottom) {
+              term?.scrollToBottom()
+            }
+          })
         }
       } else if (msg.action === 'auth_required') {
         needPassword.value = true
@@ -168,7 +213,12 @@ function connectTerminal(password?: string) {
     } catch {
       const payload = sanitizeAnsiStreamForTheme(event.data)
       if (payload) {
-        term?.write(payload)
+        const wasAtBottom = isUserAtBottom()
+        term?.write(payload, () => {
+          if (wasAtBottom) {
+            term?.scrollToBottom()
+          }
+        })
       }
     }
   }
@@ -193,23 +243,118 @@ function submitPassword() {
   connectTerminal(pwd)
 }
 
+/**
+ * 终端尺寸解算：
+ * 终端显示区严格吸附到单元格行高的整数倍（xterm 自身高度 = rows × cellHeight），背景与之同高无缝跟随；
+ * 浏览器窗口自由缩放产生的非整行余量，不留在终端内部，而是拆分给上方状态栏（本组件）
+ * 与下方 AI Copilot 栏（父级，经 `slack` 事件上报）承担，两者仅表现为内边距略有伸缩。
+ */
 function handleResize() {
-  if (!fitAddon || !term || !ws || ws.readyState !== WebSocket.OPEN) return
+  if (!term || !terminalEl.value || !rootEl.value) return
   try {
-    fitAddon.fit()
-    ws.send(
-      JSON.stringify({
-        action: 'resize',
-        payload: {
-          cols: term.cols,
-          rows: term.rows
-        }
-      })
-    )
+    const rect = rootEl.value.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return
+
+    const core = (term as any)._core
+    const renderCellWidth = core?._renderService?.dimensions?.css?.cell?.width || 0
+    const renderCellHeight = core?._renderService?.dimensions?.css?.cell?.height || 0
+    const cellWidth = Math.max(7.5, renderCellWidth || 7.82)
+    const cellHeight = Math.max(18.0, renderCellHeight || 19.0)
+
+    // 不含任何余量时的原始可用高度（根高度 + 父级已承担的余量 - 状态栏基础高度）
+    const baseHeight = rect.height + props.externalSlack - HEADER_BASE_HEIGHT
+    const cols = Math.max(20, Math.floor(rect.width / cellWidth))
+    const rows = Math.max(5, Math.floor(baseHeight / cellHeight))
+
+    const slack = Math.max(0, baseHeight - rows * cellHeight)
+    const top = Math.floor(slack / 2)
+    const bottom = slack - top
+    headerExtra.value = top
+    terminalHeight.value = rows * cellHeight
+    emit('slack', { top, bottom })
+
+    if (term.cols !== cols || term.rows !== rows) {
+      term.resize(cols, rows)
+    }
+
+    currentCols.value = term.cols
+    currentRows.value = term.rows
+
+    // 若用户原本处于底端，新尺寸生效后滚至底端贴底；若用户在向上翻看历史，不干扰其视线
+    if (isUserAtBottom()) {
+      term.scrollToBottom()
+    }
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      if (term.cols !== lastSentCols || term.rows !== lastSentRows) {
+        lastSentCols = term.cols
+        lastSentRows = term.rows
+        ws.send(
+          JSON.stringify({
+            action: 'resize',
+            payload: {
+              cols: term.cols,
+              rows: term.rows
+            }
+          })
+        )
+      }
+    }
   } catch {
-    // ignore
+    // 降级兜底
+    try {
+      fitAddon?.fit()
+      if (term) {
+        currentCols.value = term.cols
+        currentRows.value = term.rows
+      }
+    } catch {
+      // ignore
+    }
   }
 }
+
+function sendData(data: string) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(
+      JSON.stringify({
+        action: 'stdin',
+        payload: data
+      })
+    )
+  }
+}
+
+function sendCommand(command: string) {
+  if (!command) return
+  const payload = command.endsWith('\r') || command.endsWith('\n') ? command : `${command}\r`
+  sendData(payload)
+}
+
+function interrupt() {
+  sendData('\x03') // Ctrl+C
+}
+
+function clearScreen() {
+  sendData('clear\r')
+  term?.clear()
+}
+
+function focus() {
+  term?.focus()
+}
+
+defineExpose({
+  sendData,
+  sendCommand,
+  interrupt,
+  clearScreen,
+  focus,
+  cols: currentCols,
+  rows: currentRows,
+  isConnected,
+  isConnecting
+})
 
 onMounted(() => {
   nextTick(() => {
@@ -217,9 +362,13 @@ onMounted(() => {
 
     term = new Terminal({
       cursorBlink: true,
+      cursorStyle: 'block',
       fontFamily: 'Menlo, Monaco, "Courier New", monospace',
       fontSize: 13,
-      lineHeight: 1.25,
+      lineHeight: 1.267,
+      scrollback: 5000,
+      scrollOnUserInput: true,
+      smoothScrollDuration: 100,
       allowTransparency: true,
       theme: getTerminalTheme(resolvedColorScheme.value)
     })
@@ -228,9 +377,9 @@ onMounted(() => {
     term.loadAddon(fitAddon)
     term.open(terminalEl.value)
 
-    // 立即同步执行 fit 计算，杜绝默认 24 行在挂载初期出现底部未填满空隙
+    // 立即执行精准防截断尺寸计算
     try {
-      fitAddon.fit()
+      handleResize()
     } catch {
       // ignore
     }
@@ -238,7 +387,7 @@ onMounted(() => {
     // 在下一渲染帧兜底，确保 flex 容器尺寸微调后精准对齐
     requestAnimationFrame(() => {
       try {
-        fitAddon?.fit()
+        handleResize()
       } catch {
         // ignore
       }
@@ -257,12 +406,22 @@ onMounted(() => {
     })
 
     window.addEventListener('resize', handleResize)
+    if (terminalEl.value && typeof ResizeObserver !== 'undefined') {
+      resizeObserver = new ResizeObserver(() => {
+        handleResize()
+      })
+      resizeObserver.observe(rootEl.value ?? terminalEl.value)
+    }
     connectTerminal()
   })
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
   if (ws) {
     ws.close()
     ws = null
@@ -292,9 +451,12 @@ watch(
 </script>
 
 <template>
-  <div class="relative w-full h-full flex flex-col bg-slate-950 overflow-hidden select-text">
+  <div ref="rootEl" class="relative w-full h-full flex flex-col bg-slate-950 overflow-hidden select-text">
     <!-- 终端状态信息条 -->
-    <div class="h-7 px-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs shrink-0 select-none">
+    <div
+      class="px-3 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs shrink-0 select-none"
+      :style="{ height: `${HEADER_BASE_HEIGHT + headerExtra}px` }"
+    >
       <div class="flex items-center gap-2">
         <span
           :class="[
@@ -305,19 +467,28 @@ watch(
         <span class="font-mono text-slate-300">{{ props.hostAlias }}</span>
       </div>
 
-      <button
-        type="button"
-        @click="connectTerminal()"
-        class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-100 border border-slate-700/60 cursor-pointer transition"
-        title="重新连接终端"
-      >
-        <RefreshCw class="w-3 h-3" />
-        <span>重连</span>
-      </button>
+      <div class="flex items-center gap-2">
+        <span class="font-mono text-[10px] text-slate-500 select-none">
+          {{ currentCols }} × {{ currentRows }}
+        </span>
+        <button
+          type="button"
+          @click="connectTerminal()"
+          class="flex items-center gap-1 text-[11px] px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-slate-100 border border-slate-700/60 cursor-pointer transition"
+          title="重新连接终端"
+        >
+          <RefreshCw class="w-3 h-3" />
+          <span>重连</span>
+        </button>
+      </div>
     </div>
 
-    <!-- xterm 容器 -->
-    <div ref="terminalEl" class="flex-1 w-full h-full p-2 bg-slate-950 overflow-hidden" />
+    <!-- xterm 终端视口：高度严格为 rows × 行高，吸附整行；其余空间由上下栏承担 -->
+    <div
+      ref="terminalEl"
+      class="w-full p-0 bg-slate-950 overflow-hidden shrink-0"
+      :style="{ height: terminalHeight === null ? 'auto' : `${terminalHeight}px` }"
+    />
 
     <!-- 临时密码交互输入弹窗 -->
     <div
@@ -366,15 +537,21 @@ watch(
 </template>
 
 <style>
-/* 保证 xterm 视口完美撑满容器，并彻底覆盖 xterm.css 默认硬编码的 #000 黑底，消除强刷与未填满区域闪黑 */
+/* 保证 xterm 视口完美撑满容器，消除突兀边界，并彻底覆盖 xterm.css 默认硬编码的 #000 黑底 */
 .xterm {
   height: 100%;
+  width: 100%;
+  padding: 0;
 }
 
 .xterm,
 .xterm .xterm-viewport,
+.xterm .xterm-scrollable-element,
 .xterm .xterm-screen {
   background-color: var(--surface-950) !important;
+  border: none !important;
+  outline: none !important;
+  box-shadow: none !important;
 }
 
 .xterm-viewport {
