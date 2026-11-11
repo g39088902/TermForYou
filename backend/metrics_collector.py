@@ -1,3 +1,4 @@
+import re
 import os
 import time
 import json
@@ -291,12 +292,25 @@ data['processes'] = processes
 # 2. Docker 容器列表 (Docker Containers)
 containers = []
 if shutil.which('docker'):
-    dk_out = run_cmd(['docker', 'ps', '-a', '--no-trunc', '--format', '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{.CreatedAt}}'], timeout=3)
+    dk_out = run_cmd(['docker', 'ps', '-a', '--no-trunc', '--format', '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{.CreatedAt}}|{{.Size}}'], timeout=10)
+    if not dk_out:
+        dk_out = run_cmd(['docker', 'ps', '-a', '--no-trunc', '--format', '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{.CreatedAt}}|'], timeout=3)
+    mounts_map = {}
+    mt_out = run_cmd(['docker', 'inspect', '-f', '{{.Id}}|{{range .Mounts}}{{.Type}}:{{.Source}}:{{.Destination}};{{end}}', *[x.split('|')[0] for x in (dk_out or '').strip().splitlines()[:25] if x]], timeout=8) if dk_out else ''
+    for ml in mt_out.strip().splitlines():
+        if '|' not in ml: continue
+        mid, mv = ml.split('|', 1)
+        vols = []
+        for item in mv.split(';'):
+            parts = item.split(':')
+            if len(parts) >= 3 and parts[0] in ('bind', 'volume'):
+                vols.append({'hostPath': parts[1], 'containerPath': ':'.join(parts[2:]), 'type': parts[0]})
+        mounts_map[mid[:12]] = vols
     if dk_out:
         for line in dk_out.strip().splitlines()[:25]:
             if not line: continue
             try:
-                cid, cname, cimg, cstatus, cstate, cports, ccreated = line.split('|', 6)
+                cid, cname, cimg, cstatus, cstate, cports, ccreated, csize = line.split('|', 7)
                 parsed_ports = []
                 if cports:
                     for p in cports.split(','):
@@ -314,7 +328,7 @@ if shutil.which('docker'):
                             c_part = p.split('/')[0]
                             if c_part.isdigit(): c_port = int(c_part)
                             if '/udp' in p: proto = 'udp'
-                        if h_port or c_port:
+                        if (h_port or c_port) and not any(x['hostPort'] == (h_port or c_port) and x['containerPort'] == (c_port or h_port) and x['protocol'] == proto for x in parsed_ports):
                             parsed_ports.append({
                                 'hostPort': h_port or c_port,
                                 'containerPort': c_port or h_port,
@@ -329,7 +343,8 @@ if shutil.which('docker'):
                     'cpuPercent': 0.8 if 'up' in cstatus.lower() else 0,
                     'memMb': 128 if 'up' in cstatus.lower() else 0,
                     'ports': parsed_ports,
-                    'volumes': [],
+                    'volumes': mounts_map.get(cid[:12], []),
+                    'diskUsage': csize,
                     'createdAt': ccreated[:19]
                 })
             except Exception:
@@ -835,6 +850,24 @@ class HostMetricsService:
             # 取最后一行 JSON 输出
             lines = [l for l in out_str.splitlines() if l.strip()]
             return json.loads(lines[-1])
+        except Exception as e:
+            self._connections.pop(host_alias, None)
+            return {"status": "error", "message": str(e)}
+
+    async def remove_docker_container(self, host_alias: str, container: str, force: bool = False, remove_volumes: bool = False) -> Dict[str, Any]:
+        """通过单次 SSH 会话删除 Docker 容器（可选强制/同时删除匿名卷）"""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container or ""):
+            return {"status": "error", "message": "非法容器名称或 ID"}
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return {"status": "error", "error_type": err_type or "connection_error", "message": err_msg or "无法建立 SSH 连接"}
+        flags = ("-f " if force else "") + ("-v " if remove_volumes else "")
+        base = f"docker rm {flags}{shlex.quote(container)}"
+        try:
+            res = await conn.run(f"{base} 2>&1 || sudo -n {base} 2>&1", timeout=30)
+            if res.exit_status == 0:
+                return {"status": "ok", "message": f"已删除容器 {container}"}
+            return {"status": "error", "message": (res.stdout or res.stderr or "删除失败").strip()}
         except Exception as e:
             self._connections.pop(host_alias, None)
             return {"status": "error", "message": str(e)}

@@ -1,99 +1,96 @@
-# TermForYou - Developer & Agent Architecture Guide (AGENTS.md)
+# TermForYou - Developer & Agent Guide (AGENTS.md)
 
-> 本文档面向参与 **TermForYou** 项目迭代的 AI Agents 与开发者。核心规范与架构红线必须无条件严格遵守。
-
----
-
-## 1. 核心哲学与架构红线
-
-1. **严格零凭据持久化 (Zero-Storage Security)**
-   - 严禁在 SQLite、本地文件、环境变量或前端持久化存储（LocalStorage / IndexedDB）中写入明文密码或私钥。
-   - 密码认证主机仅允许**内存临时凭据**在后端生命周期或前端会话中流转，刷新或重启后即刻蒸发。
-2. **原生 SSH 配置感知与透明同步 (Native SSH First)**
-   - 唯一配置源为本机 `~/.ssh/config`，新增/修改必须写回此文件。
-   - 写入新主机块时，**必须严格保证 `User` 在 `HostName`（IP）之前**。
-3. **轻量非侵入式 (Agentless)**
-   - 目标机无需安装常驻 Agent，所有硬件指标、系统服务、Docker 与安全规则均通过单次 SSH 会话批量执行标准命令解析获取。
+> 面向参与本项目迭代的 AI Agents 与开发者。第 1、4 节为必须遵守的红线。产品范围与进度见 `docs/PRD.md`。
 
 ---
 
-## 2. 系统架构与通信拓扑
+## 1. 架构红线
 
-| 模块 | 技术选型 | 职责说明 |
-| :--- | :--- | :--- |
-| **前端** | Vue 3 + Vite 6 + Pinia + Tailwind v4 | 响应式工作台、多会话状态中枢 (`workbenchStore.ts`) |
-| **终端仿真** | `@xterm/xterm` + `FitAddon` + `WebLinksAddon` | 高性能 Canvas 渲染，WebSocket 伪终端 (PTY) |
-| **后端** | Python 3.10+ FastAPI + `asyncssh` | 异步 SSH2 协议、PTY 会话代理、指令巡检探针 |
-| **元数据存储** | SQLite (`backend/termforyou.sqlite3`) | **仅存储**用户设置、标签、命令 Intel 等非敏感元数据 |
+1. **零凭据持久化**
+   - 严禁把明文密码、私钥口令写入 SQLite、本地文件、环境变量、LocalStorage / IndexedDB。
+   - 密码仅存后端内存字典（`metrics_service.set_credential`）或前端会话内存，重启/刷新即失效。
+   - LocalStorage 只允许存非敏感偏好（现有：`color-scheme`、`termforyou_auto_probe`、`termforyou_file_bookmarks`）。
+2. **原生 SSH 配置优先**
+   - 唯一主机来源是本机 `~/.ssh/config`，新增/修改/删除必须写回该文件。
+   - 写入主机块时 **`User` 必须在 `HostName` 之前**。
+3. **免 Agent**
+   - 不在目标机安装常驻进程；信息通过单次 SSH 会话批量执行标准命令获取。
+   - 远端采集和文件操作脚本依赖目标机的 `python3`（见 `metrics_collector.py`），新增采集逻辑要兼容 Ubuntu/Debian/CentOS/Alpine，并对缺失命令降级。
+4. **远端写操作必须安全**
+   - 拼接到远端 shell 的路径、容器名等一律校验或 `shlex.quote`（参考 `remove_docker_container` 的名称白名单）。
+   - `sudo` 提权默认关闭，只能由用户显式勾选，禁止按路径自动开启。
+   - 删除类操作必须有确认对话框。
+
+---
+
+## 2. 技术栈与结构
+
+| 层 | 技术 |
+| :--- | :--- |
+| 前端 | Vue 3 + Vite 6 + Tailwind CSS v4 + TypeScript；状态是 `src/stores/workbenchStore.ts` 中的 `reactive` 单例（**未使用 Pinia**） |
+| 终端 | `@xterm/xterm` + `@xterm/addon-fit`（组件 `components/terminal/RealXtermTerminal.vue`） |
+| 后端 | Python 3.10+ FastAPI + `asyncssh`，标准库 `sqlite3` |
+| 存储 | `backend/termforyou.sqlite3`，目前仅 `host_stats`（连接次数、最后连接时间） |
 
 ```
-前端 (Vue 3 + Tailwind v4 + xterm.js)
-  │ WebSocket: /ws/terminal/{alias} (双向 PTY 输入输出流 + resize 信号)
-  │ HTTP REST: /api/v1/ssh/*, /api/v1/hosts/* (探针/指标/配置同步/密码临时验证)
-  ▼
-FastAPI + asyncssh
-  ├─ ssh_config_parser (双向读写 ~/.ssh/config)
-  ├─ probe_service & metrics_collector (单会话多指标批量采集)
-  └─ SQLite (termforyou.sqlite3 - 仅非敏感偏好)
-  ▼ SSH 2.0 (Port 22/自定义)
-远端 Linux 群 (CentOS / Ubuntu / Debian / Alpine)
+前端 :5173 ──HTTP /api/v1/ssh/*──▶ FastAPI :8000 ──asyncssh──▶ 远端 Linux
+          ──WS /ws/terminal/{alias}─▶
 ```
 
----
-
-## 3. 核心机制与开发规范
-
-### 3.1 探针巡检与认证三态推导
-- **认证方式识别 (`auth_method`)**：
-  - `custom_key`: `~/.ssh/config` 显式配置 `IdentityFile`。
-  - `default_key`: 未配置 `IdentityFile`，但通过本机默认密钥（`id_rsa`, `id_ed25519` 或 `ssh-agent`）握手成功。
-  - `password`: 免密被拒（`auth_failed: true`）或通过运行时临时密码握手成功。
-- **动态标签更新**：`workbenchStore.ts` 动态映射：`免密/密码认证`（初始）→ `默认密钥`（绿）或 `密码认证`（黄/紫）。
-- **指标批量采集**：在 `metrics_collector.py` 中用分隔符拼装单条执行流，兼容标准 Linux 与 Alpine，输出映射至 Pydantic 与 TypeScript 接口。
-
-### 3.2 终端仿真与视口对齐规范
-- **尺寸解算规范**：行数解算以真实 DOM 渲染行高（$\ge 18.5\text{px}$）为基准铺满可用高度，消除外部僵死空白，确保向下滚动全屏显示 log。容器采用 `flex-1 min-h-0 w-full`，杜绝 `h-full` 造成的物理溢出。
-- **Mac/多端滚动视口贴合**：针对 xterm 6.0 内部机制，强制 `.xterm .xterm-scrollable-element` 具备 `height: 100% !important;`，消除 macOS/各平台下由于 `xterm-scrollable-element` 内联像素赋值与 `.xterm-viewport` 测量尺寸不一致导致的下挂缝隙，使两者底边恒为 $0\text{px}$ 误差完全贴合。
-- **系统终端级滚动体验**：仅当用户处于最底端时新数据自动跟随滚动到底部；若用户主动向上滚动使输入区居中或查看历史日志，绝不强行拽到底部打断用户。
-- **PTY 同步**：通过 `{"type": "resize", "cols": n, "rows": m}` 实时调整远端内核 PTY；环境变量强制注入 `LANG=en_US.UTF-8`。
-
-### 3.3 UI/UX 与双主题标准 (Tailwind CSS v4)
-- **WCAG AAA 高对比度原则**：
-  - 浅色模式：浅底深字，杜绝白字浅灰；深色模式：深底高亮字。
-  - 连通/成功 (Emerald): `bg-emerald-500/15 text-emerald-700` (深色: `text-emerald-300`)
-  - 警示/未连通 (Amber): `bg-amber-500/15 text-amber-800` (深色: `text-amber-200`)
-  - 离线/错误 (Rose): `bg-rose-500/15 text-rose-700` (深色: `text-rose-300`)
-  - 信息/特定密钥 (Sky): `bg-sky-500/15 text-sky-700` (深色: `text-sky-300`)
+- 后端地址在前端写死为 `http://127.0.0.1:8000`。
+- 终端 WebSocket 为 JSON 帧：客户端 `auth`（首帧，含 cols/rows/term/可选密码）、`stdin`、`resize`（`payload: {cols, rows}`）、`ping`；服务端 `stdout`、`stderr`、`auth_required`、`pong`。
+- 页面 ID：`P0_HOSTS`、`P1_WORKBENCH`、`P2_METRICS_PROCESS`、`P3_FILES`、`P4_COMMANDS`、`P5_DOCKER`、`P6_SYSTEMD`、`P7_CRON`、`P8_FIREWALL`。
+- 新增后端能力时，同步更新 `backend/models.py`、`src/types/index.ts` 与 `docs/PRD.md`。
 
 ---
 
-## 4. 交互铁律与防坑指南
+## 3. 开发规范
 
-1. **静默生效，严禁自嗨式修复提示**：
-   - 底层修复（如视口截断、防抖、边距修正、容错重连）必须在底层**静默生效**。
-   - **绝对禁止**在界面添加“某某 Bug 已修复”、“视界保护已生效”等技术细节告示或徽章。
-2. **杜绝冗余交互，定位 AI Copilot**：
-   - 终端的首要交互是黑屏键盘直接输入；严禁在外部设计重复敲原生命令的独立输入框。
-   - 终端外部输入框**仅作为自然语言 AI 生成命令 Copilot**，辅助转化运维意图为可执行命令。
-3. **密码临时生命周期**：
-   - 前端提交临时密码至 `/api/v1/ssh/credentials/{host_alias}`，仅存内存字典，禁止写库。
+### 3.1 认证方式三态（`auth_method`）
+- `custom_key`：`~/.ssh/config` 显式配置了 `IdentityFile`。
+- `default_key`：未配置 `IdentityFile`，但默认密钥或 `ssh-agent` 握手成功。
+- `password`：免密被拒（`auth_failed`）或通过临时密码握手成功。
+- 前端标签：初始「免密/密码认证」→ 探测后「默认密钥」或「密码认证」。
+
+### 3.2 终端视口
+- 行数按真实 DOM 行高（≥ 18.5px）取整铺满可用高度，分数余量由状态栏/Copilot 栏吸收，不得截断最后一行。
+- 容器使用 `flex-1 min-h-0 w-full`，避免 `h-full` 造成溢出。
+- 保持 `.xterm .xterm-scrollable-element { height: 100% !important; }`，消除 xterm 6 在 macOS 下的底部缝隙。
+- 仅当用户已在底部时才自动跟随滚动；用户向上翻看历史时不得强制拉回底部。
+- 通过 `resize` 帧同步远端 PTY 尺寸；终端环境强制 `LANG=en_US.UTF-8`。
+
+### 3.3 UI 与主题
+- 颜色走 WCAG AAA：浅色模式浅底深字，深色模式深底亮字。
+- 状态徽章：成功 Emerald、警示 Amber、错误 Rose、信息 Sky，均用 `bg-{c}-500/15`，文字浅色用 `-700`（Amber 用 `-800`）、深色用 `-300`（Amber 用 `-200`）。
+- 列表类视图：不要给默认项预设「选中/悬停」外观；只有用户操作后才出现选中态；可交互行需支持键盘（Tab/方向键/Enter/空格）。
 
 ---
 
-## 5. 质量验证与构建工作流
+## 4. 交互铁律
 
-每次修改必须执行并全绿通过：
+1. **静默生效**：底层修复（视口、防抖、重连等）不得在界面加「已修复」「保护已生效」之类提示。
+2. **终端外输入框只做 AI Copilot**：用于把自然语言转成命令；不得再做重复原生命令输入的框。
+3. **临时密码**：前端 POST 到 `/api/v1/ssh/credentials/{host_alias}`，只进后端内存，禁止写库。
+
+---
+
+## 5. 验证与提交
+
+每次修改后：
 
 ```bash
-# 1. 前端构建校验 (零错误、零警告)
+# 1. 前端类型检查 + 构建，必须零错误
 pnpm run build
 
-# 2. 探测与后端接口校验
+# 2. 后端启动后做接口冒烟（需先运行 uvicorn）
+curl -s http://127.0.0.1:8000/api/v1/ssh/hosts | jq 'length'
 curl -s -X POST http://127.0.0.1:8000/api/v1/ssh/probe-all | jq .
 
-# 3. 双主题无损视觉校验 (无头截屏)
+# 3. 改动 UI 时做深浅主题截图（需先运行 pnpm run dev）
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --headless --screenshot=/tmp/verify_light.png --window-size=1440,900 http://localhost:5173/
 /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --headless --screenshot=/tmp/verify_dark.png --blink-settings=forceDarkModeEnabled=true --window-size=1440,900 http://localhost:5173/
-
-# 4. Git 规范: Conventional Commits (feat, fix, refactor, style, docs)
 ```
+
+- 仓库暂无自动化测试，改动后端逻辑时请手动对真实/测试主机验证。
+- 提交遵循 Conventional Commits（`feat` / `fix` / `refactor` / `style` / `docs`）。
+- `*.sqlite*`、`dist/` 已被 `.gitignore` 忽略，不要提交。

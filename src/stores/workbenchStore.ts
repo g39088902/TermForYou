@@ -1174,6 +1174,26 @@ export async function fetchHostMetrics(hostId: string) {
   }
 }
 
+export async function removeDockerContainer(containerName: string, force = false, removeVolumes = false): Promise<boolean> {
+  const hostId = store.activeHostId
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/docker/${encodeURIComponent(hostId)}/containers/${encodeURIComponent(containerName)}?force=${force}&remove_volumes=${removeVolumes}`,
+      { method: 'DELETE' }
+    )
+    const data = await res.json()
+    if (data.status === 'ok') {
+      store.dockerContainers = store.dockerContainers.filter(c => c.name !== containerName)
+      showToast(data.message || `已删除容器 ${containerName}`)
+      return true
+    }
+    showToast(`删除失败：${data.message || data.detail || '未知错误'}`)
+  } catch (e) {
+    showToast(`删除失败：${(e as Error).message}`)
+  }
+  return false
+}
+
 export async function inspectHost(hostId: string) {
   const host = store.hosts.find((h) => h.id === hostId)
   if (!host) return

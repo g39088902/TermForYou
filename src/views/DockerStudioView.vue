@@ -4,8 +4,8 @@ import {
   store,
   navigateWithContext,
   executeTerminalCommand,
-  openFileInEditor,
-  showToast
+  showToast,
+  removeDockerContainer
 } from '@/stores/workbenchStore'
 import {
   Container,
@@ -13,11 +13,21 @@ import {
   FolderOpen,
   ShieldAlert,
   ShieldCheck,
-  FileCode2,
   RotateCw,
   ArrowLeftRight,
-  Star
+  Star,
+  Trash2,
+  HardDrive
 } from 'lucide-vue-next'
+
+async function confirmRemove(name: string, running: boolean) {
+  const msg = running
+    ? `容器 ${name} 正在运行，确认强制删除？`
+    : `确认删除容器 ${name}？`
+  if (!window.confirm(msg)) return
+  const withVols = window.confirm('是否同时删除该容器关联的匿名数据卷？(宿主机 bind 挂载目录不会被删除)')
+  await removeDockerContainer(name, running, withVols)
+}
 
 const dockerRunInput = ref(
   'docker run -d --name mysql-prod --restart always -p 3306:3306 -v /data/mysql:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=secret mysql:8.4'
@@ -72,15 +82,6 @@ function saveDockerRunAsSnippet() {
             容器实例运行状态、资源占用与端口映射管理。
           </p>
         </div>
-
-        <button
-          type="button"
-          @click="openFileInEditor('/opt/stacks/gateway/docker-compose.yml')"
-          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-500 text-xs font-semibold text-white cursor-pointer"
-        >
-          <FileCode2 class="w-3.5 h-3.5" />
-          <span>编辑 Gateway Compose 栈 (YAML)</span>
-        </button>
       </div>
 
       <div tabindex="0" role="region" aria-labelledby="docker-table-heading" class="table-wrapper">
@@ -94,7 +95,7 @@ function saveDockerRunAsSnippet() {
               <th class="py-2.5 px-3 text-right">容器管控</th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-slate-800/70">
+          <tbody class="[&>tr:last-child>*]:border-b-0">
             <tr
               v-for="c in store.dockerContainers"
               :key="c.id"
@@ -103,7 +104,7 @@ function saveDockerRunAsSnippet() {
                 store.lastJumpContext?.filterContainer === c.id ? 'bg-sky-500/10' : ''
               ]"
             >
-              <th class="py-3 px-3 font-medium text-slate-100">
+              <th class="py-3 px-3 font-medium text-slate-100 align-top text-left border-b border-slate-800">
                 <div class="flex items-center gap-2">
                   <span class="w-2 h-2 rounded-full bg-emerald-400" />
                   <span class="font-bold">{{ c.name }}</span>
@@ -117,17 +118,20 @@ function saveDockerRunAsSnippet() {
                 <div class="font-mono text-[11px] text-slate-400 mt-0.5">{{ c.image }}</div>
               </th>
 
-              <td class="py-3 px-3 font-mono">
+              <td class="py-3 px-3 font-mono align-top border-b border-slate-800">
                 <div class="text-emerald-400">CPU {{ c.cpuPercent }}%</div>
                 <div class="text-slate-400 text-[11px]">MEM {{ c.memMb }} MB</div>
+                <div v-if="c.diskUsage" class="flex items-center gap-1 text-sky-300 text-[11px]" title="容器可写层占用 (virtual 含镜像层)">
+                  <HardDrive class="w-3 h-3" /><span>磁盘 {{ c.diskUsage }}</span>
+                </div>
               </td>
 
               <!-- 端口映射与防火墙状态联动 -->
-              <td class="py-3 px-3">
+              <td class="py-3 px-3 align-top border-b border-slate-800">
                 <div class="flex flex-wrap gap-1.5">
                   <button
                     v-for="p in c.ports"
-                    :key="p.hostPort"
+                    :key="`${p.hostPort}-${p.containerPort}-${p.protocol}`"
                     type="button"
                     @click="
                       navigateWithContext({
@@ -158,11 +162,12 @@ function saveDockerRunAsSnippet() {
               </td>
 
               <!-- 存储卷宿主机目录直达 -->
-              <td class="py-3 px-3">
-                <div class="space-y-1">
+              <td class="py-3 px-3 align-top border-b border-slate-800">
+                <div class="flex flex-col items-start gap-1 min-w-[260px]">
                   <button
                     v-for="v in c.volumes"
-                    :key="v.hostPath"
+                    :key="v.hostPath + v.containerPath"
+                    :title="`${v.hostPath} → ${v.containerPath}`"
                     type="button"
                     @click="
                       navigateWithContext({
@@ -172,21 +177,22 @@ function saveDockerRunAsSnippet() {
                         openPath: v.hostPath
                       })
                     "
-                    class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono text-[11px] cursor-pointer"
+                    class="flex items-center gap-1.5 max-w-full px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono text-[11px] cursor-pointer"
                   >
                     <FolderOpen class="w-3 h-3 shrink-0" />
-                    <span class="truncate max-w-[230px]">{{ v.hostPath }}</span>
+                    <span class="truncate max-w-[200px]">{{ v.hostPath }}</span>
+                    <span class="text-slate-400 shrink-0 whitespace-nowrap">→ {{ v.containerPath }}</span>
                   </button>
                 </div>
               </td>
 
               <!-- 容器动作：一键进入容器终端 / 重启 -->
-              <td class="py-3 px-3 text-right">
-                <div class="inline-flex items-center gap-1.5">
+              <td class="py-3 px-3 text-right align-top whitespace-nowrap border-b border-slate-800">
+                <div class="inline-flex items-center gap-1.5 whitespace-nowrap">
                   <button
                     type="button"
                     @click="executeTerminalCommand(`docker exec -it ${c.name} /bin/sh`, true)"
-                    class="flex items-center gap-1 px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-medium cursor-pointer"
+                    class="flex items-center gap-1 whitespace-nowrap shrink-0 px-2.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] font-medium cursor-pointer"
                   >
                     <Terminal class="w-3 h-3" />
                     <span>Exec 终端</span>
@@ -198,6 +204,14 @@ function saveDockerRunAsSnippet() {
                     title="重启容器"
                   >
                     <RotateCw class="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    @click="confirmRemove(c.name, c.status === 'running')"
+                    class="p-1.5 rounded bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 cursor-pointer"
+                    title="删除容器"
+                  >
+                    <Trash2 class="w-3.5 h-3.5" />
                   </button>
                 </div>
               </td>

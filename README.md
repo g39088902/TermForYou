@@ -1,93 +1,72 @@
 # TermForYou
 
-> 以终端为中心的高性能、轻量化服务器可视化运维工作台。  
-> 拒绝臃肿监控全家桶，开箱即用，原生解析本机 `~/.ssh/config`，严格零凭据持久化存储。
+> 以终端为中心的轻量服务器可视化运维工作台。直接读取本机 `~/.ssh/config`，免 Agent，零凭据持久化。
 
----
+## 核心特性
 
-## 🌟 核心特性
+- **终端优先**：`@xterm/xterm` + 后端 `asyncssh` PTY，经 WebSocket 实时直连。
+- **原生 SSH 配置**：`~/.ssh/config` 是唯一主机来源，新增/删除主机直接写回该文件。
+- **零凭据持久化**：密码只存在后端内存，重启即失效；SQLite 仅记录连接次数等非敏感元数据。
+- **免 Agent 可视化运维**：通过单次 SSH 会话批量采集，覆盖性能与进程、文件管理、Docker、Systemd、Cron、防火墙，并提供命令提炼与 AI Copilot 命令生成（目前为前端启发式，尚未接入真实 LLM）。
+- **深浅双主题**：Tailwind CSS v4，跟随系统偏好，可手动切换。
 
-- 🖥️ **以终端为中心 (Terminal-First)**: 集成 `@xterm/xterm` 与 Python `asyncssh` PTY WebSocket 实时直连。
-- ⚡ **原生 SSH 配置感知**: 自动解析本地 `~/.ssh/config`，无感同步已知主机、别名与密钥认证。
-- 🔒 **严格零凭据持久化 (Zero-Storage)**: 前后端绝不持久化任何密码与私钥，非密钥主机仅于内存会话中临时传递。
-- 🎨 **自适应设计系统**: 基于 Vue 3 + Tailwind CSS v4 与 CSS `light-dark()` 规范，完美支持深浅主题无缝切换与系统偏好同步。
-- 🗂️ **顶天立地功能导航**: 左侧核心全局导航，支持多标签会话切换与全屏工作流。
-
----
-
-## 🏗️ 架构概览
+## 架构
 
 ```
-Frontend (Vue 3 + Vite + Tailwind v4 + xterm.js)
-  │
-  ├── HTTP REST  ──> FastAPI (:8000/api/hosts) 读取本地 ~/.ssh/config 主机池
-  │
-  └── WebSocket  ──> FastAPI (:8000/ws/terminal/{host_alias})
-                        │
-                        └── asyncssh PTY (直接建立 SSH 管道直连远端目标服务器)
+Vue 3 + Vite + Tailwind v4 + xterm.js   (:5173)
+  ├─ HTTP REST  → FastAPI  http://127.0.0.1:8000/api/v1/ssh/*
+  └─ WebSocket  → FastAPI  ws://127.0.0.1:8000/ws/terminal/{host_alias}
+                      └─ asyncssh → 远端 Linux（PTY / 批量命令）
 ```
 
----
+前端把后端地址写死为 `http://127.0.0.1:8000`，后端需监听该地址。
 
-## 🚀 快速启动
+## 环境要求
 
-### 1. 运行后端 (Python FastAPI + asyncssh)
+- Node.js 20+ 与 pnpm
+- Python 3.10+
+- **远端主机**：Linux，需有 `python3`（巡检与文件管理依赖它执行采集脚本）；`sudo` 相关功能需要免密 sudo 或交互授权；Docker/ufw 等信息仅在远端已安装时可用。
+
+## 快速启动
 
 ```bash
+# 后端
 cd backend
-
-# 创建并激活虚拟环境 (可选/推荐)
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 安装依赖
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# 启动服务 (默认监听 127.0.0.1:8000)
 uvicorn main:app --host 127.0.0.1 --port 8000 --reload
-```
 
-### 2. 运行前端 (Vue 3 + Vite)
-
-```bash
-# 安装前端依赖 (使用 pnpm)
+# 前端（另开终端，在仓库根目录）
 pnpm install
-
-# 启动开发服务器
-pnpm run dev
+pnpm run dev        # http://localhost:5173
+pnpm run build      # 类型检查 + 生产构建
 ```
 
-浏览器访问 `http://localhost:5173` 即可开始使用。
-
----
-
-## 📦 项目结构
+## 项目结构
 
 ```
-TermForYou/
-├── backend/
-│   ├── main.py               # FastAPI 服务入口与 WebSocket PTY 代理
-│   ├── models.py             # 数据模型 (HostInfo 等)
-│   ├── ssh_config_parser.py  # ~/.ssh/config 原生解析器
-│   └── requirements.txt      # Python 依赖清单
-├── src/
-│   ├── components/
-│   │   ├── layout/           # 侧边栏导航、顶栏会话切换、HUD 面板
-│   │   └── terminal/         # xterm.js 终端、分屏与虚拟终端组件
-│   ├── views/                # 主机池、命令提炼、Docker、文件管理等视图
-│   ├── stores/               # 状态管理
-│   ├── services/             # API 请求与 WebSocket 客户端
-│   ├── types/                # TypeScript 类型定义
-│   ├── App.vue
-│   └── main.ts
-├── docs/
-│   └── PRD.md                # 完整产品需求规格说明书
-├── package.json
-└── vite.config.ts
+backend/
+  main.py               FastAPI 路由与终端 WebSocket
+  metrics_collector.py  单会话批量采集、文件/Docker 操作
+  probe_service.py      连通性与认证方式探测
+  ssh_config_parser.py  ~/.ssh/config 读写
+  db.py / models.py     SQLite（host_stats）与 Pydantic 模型
+src/
+  views/                P0 主机池 ~ P8 各功能页面
+  components/           layout（导航/会话栏/HUD/编辑器抽屉）、terminal（xterm 封装）
+  stores/workbenchStore.ts   全局状态（Vue reactive）与所有 API 调用
+  services/commandExtractor.ts  历史命令提炼
+  types/                TypeScript 类型
+docs/PRD.md             产品需求与进度
+AGENTS.md               开发规范与架构红线
 ```
 
----
+## 安全须知
 
-## 📄 开源许可
+- 本工具面向**本机单用户**使用，后端无登录鉴权，CORS 全放开，请只监听 `127.0.0.1`，不要暴露到公网。
+- 当前 SSH 连接**未校验 `known_hosts`**（`known_hosts=None`），存在中间人风险，详见 [PRD](docs/PRD.md) 的待办。
+- 文件管理、Docker 删除等为真实的远端写操作，删除不可逆。
 
-本项目遵循 MIT 开源协议。
+## 许可
+
+计划采用 MIT 协议，仓库暂未附带 `LICENSE` 文件。

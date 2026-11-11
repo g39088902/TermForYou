@@ -158,7 +158,7 @@ function isArchiveFile(name: string): boolean {
 }
 
 // 右侧 Chmod / Chown 状态与自动同步
-const selectedFileForChmod = ref<FileEntry | null>(store.files[0] ?? null)
+const selectedFileForChmod = ref<FileEntry | null>(null)
 
 // 多选状态 (Shift 连续多选、Ctrl / Cmd 点选多选、全选)
 const selectedPaths = ref<Set<string>>(new Set())
@@ -181,7 +181,7 @@ const isIndeterminate = computed(() => {
 
 function toggleSelectAll() {
   if (isAllSelected.value) {
-    selectedPaths.value.clear()
+    selectedPaths.value = new Set()
     lastSelectedPath.value = null
   } else {
     selectedPaths.value = new Set(filteredFiles.value.map((f) => f.path))
@@ -286,7 +286,7 @@ function syncChmodFromEntry(file: FileEntry | null) {
 
   chownOwner.value = file.owner || 'root'
   chownGroup.value = file.group || 'root'
-  chmodMatrix.value.sudo = file.path.startsWith('/etc') || file.path.startsWith('/usr') || file.path.startsWith('/lib')
+  chmodMatrix.value.sudo = false
 }
 
 watch(
@@ -302,17 +302,13 @@ watch(
   (newFiles) => {
     if (!newFiles || newFiles.length === 0) {
       selectedFileForChmod.value = null
-      selectedPaths.value.clear()
+      selectedPaths.value = new Set()
       lastSelectedPath.value = null
       return
     }
 
     const currentPathSet = new Set(newFiles.map((f) => f.path))
-    for (const p of selectedPaths.value) {
-      if (!currentPathSet.has(p)) {
-        selectedPaths.value.delete(p)
-      }
-    }
+    selectedPaths.value = new Set([...selectedPaths.value].filter((p) => currentPathSet.has(p)))
 
     if (selectedFileForChmod.value) {
       const match = newFiles.find((f) => f.path === selectedFileForChmod.value?.path)
@@ -322,7 +318,7 @@ watch(
         return
       }
     }
-    selectedFileForChmod.value = newFiles[0]
+    selectedFileForChmod.value = null
   }
 )
 
@@ -398,7 +394,7 @@ async function applyChmod() {
 async function jumpToDir(path: string) {
   searchQuery.value = ''
   isEditingPath.value = false
-  selectedPaths.value.clear()
+  selectedPaths.value = new Set()
   lastSelectedPath.value = null
   const ok = await fetchRemoteDirectory(path, true)
   if (ok) {
@@ -483,7 +479,7 @@ function openActionDialog(mode: DialogMode, target?: FileEntry | FileEntry[]) {
   }
 
   const cwd = currentCwd.value
-  dialogUseSudo.value = cwd.startsWith('/etc') || cwd.startsWith('/usr') || cwd.startsWith('/lib')
+  dialogUseSudo.value = false
 
   if (mode === 'touch') {
     dialogInputName.value = ''
@@ -595,7 +591,7 @@ async function submitActionDialog() {
       const data = await res.json()
       if (res.ok && data.status === 'ok') {
         showToast(data.message || `已成功删除 ${targetPaths.length} 个项目`)
-        targetPaths.forEach((p) => selectedPaths.value.delete(p))
+        selectedPaths.value = new Set([...selectedPaths.value].filter((p) => !targetPaths.includes(p)))
         closeActionDialog()
         await fetchRemoteDirectory(currentCwd.value, true)
       } else {
@@ -880,8 +876,25 @@ function handleDropUpload(e: DragEvent) {
   }
 }
 
+function handleRowKeydown(file: FileEntry, e: KeyboardEvent) {
+  if (e.target !== e.currentTarget) return
+  const row = e.currentTarget as HTMLElement
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    const sib = (e.key === 'ArrowDown' ? row.nextElementSibling : row.previousElementSibling) as HTMLElement | null
+    if (sib && sib.hasAttribute('data-file-row')) sib.focus()
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    handleRowDoubleClick(file)
+  } else if (e.key === ' ') {
+    e.preventDefault()
+    toggleRowSelection(file, e)
+  }
+}
+
 function handleKeyDown(e: KeyboardEvent) {
   // 当焦点在输入框或文本域内时不触发文件列表快捷键
+  if (actionDialogRef.value?.open) return
   const activeEl = document.activeElement
   if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
     return
@@ -899,7 +912,7 @@ function handleKeyDown(e: KeyboardEvent) {
   // Escape: 清空多选状态
   if (e.key === 'Escape' && selectedPaths.value.size > 0) {
     e.preventDefault()
-    selectedPaths.value.clear()
+    selectedPaths.value = new Set()
     lastSelectedPath.value = null
   }
 }
@@ -1250,12 +1263,12 @@ onUnmounted(() => {
 
       <!-- 批量操作控制栏 (当选中文件时显示) -->
       <div
-        v-if="selectedPaths.size > 0"
+        v-if="selectedFiles.length > 0"
         class="px-3.5 py-2 bg-cyan-950/40 border-b border-cyan-500/40 flex flex-wrap items-center justify-between gap-2 select-none"
       >
         <div class="flex items-center gap-2">
           <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 font-mono font-bold text-xs border border-cyan-500/40">
-            已选择 {{ selectedPaths.size }} 项
+            已选择 {{ selectedFiles.length }} 项
           </span>
           <span class="text-slate-400 text-xs hidden sm:inline">
             (Shift 范围多选 · Ctrl/⌘ 点选加减 · Ctrl/⌘+A 全选)
@@ -1268,10 +1281,10 @@ onUnmounted(() => {
             type="button"
             @click="downloadSelectedEntries"
             class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-medium text-xs cursor-pointer shadow-xs transition"
-            :title="selectedPaths.size === 1 ? '下载所选文件' : '将选中的多个项目自动打包为 .tar.gz 下载'"
+            :title="selectedFiles.length === 1 ? '下载所选文件' : '将选中的多个项目自动打包为 .tar.gz 下载'"
           >
             <Download class="w-3.5 h-3.5" />
-            <span>批量下载 ({{ selectedPaths.size }})</span>
+            <span>批量下载 ({{ selectedFiles.length }})</span>
           </button>
 
           <!-- 批量打包 -->
@@ -1293,13 +1306,13 @@ onUnmounted(() => {
             title="批量删除选中的项目（支持 sudo 提权）"
           >
             <Trash2 class="w-3.5 h-3.5 text-rose-400" />
-            <span>批量删除 ({{ selectedPaths.size }})</span>
+            <span>批量删除 ({{ selectedFiles.length }})</span>
           </button>
 
           <!-- 清除多选 -->
           <button
             type="button"
-            @click="selectedPaths.clear(); lastSelectedPath = null"
+            @click="selectedPaths = new Set(); lastSelectedPath = null"
             class="flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 text-xs cursor-pointer transition"
             title="取消选择 (Esc)"
           >
@@ -1372,10 +1385,14 @@ onUnmounted(() => {
               :key="file.path"
               @click="handleRowClick(file, $event)"
               @dblclick="handleRowDoubleClick(file)"
+              @keydown="handleRowKeydown(file, $event)"
+              tabindex="0"
+              :aria-selected="selectedPaths.has(file.path)"
+              data-file-row
               :class="[
                 'group hover:bg-slate-800/60 transition cursor-pointer select-none',
                 selectedPaths.has(file.path)
-                  ? 'is-selected bg-cyan-500/15 border-l-2 border-cyan-400 text-slate-100'
+                  ? 'is-selected bg-cyan-500/15 shadow-[inset_2px_0_0_0_#22d3ee] text-slate-100'
                   : selectedFileForChmod?.path === file.path
                   ? 'bg-slate-800/40'
                   : ''
@@ -1396,7 +1413,6 @@ onUnmounted(() => {
                   <FolderOpen
                     v-if="file.isDir"
                     class="w-4 h-4 text-amber-400 shrink-0"
-                    @click.stop="jumpToDir(file.path)"
                   />
                   <FileArchive
                     v-else-if="isArchiveFile(file.name)"

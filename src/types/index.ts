@@ -187,7 +187,9 @@ export interface DockerContainerItem {
   volumes: Array<{
     hostPath: string
     containerPath: string
+    type?: 'bind' | 'volume'
   }>
+  diskUsage?: string
   composeProject?: string
   composePath?: string
   createdAt: string

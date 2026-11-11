@@ -309,6 +309,11 @@ async def delete_remote_paths(host_alias: str, payload: DeleteFilesPayload):
         sudo=payload.sudo
     )
 
+@app.delete("/api/v1/ssh/docker/{host_alias}/containers/{container}")
+async def remove_docker_container(host_alias: str, container: str, force: bool = False, remove_volumes: bool = False):
+    """删除远端 Docker 容器"""
+    return await metrics_service.remove_docker_container(host_alias, container, force, remove_volumes)
+
 @app.post("/api/v1/ssh/files/{host_alias}/chmod")
 async def chmod_remote_path(host_alias: str, payload: ChmodFilePayload):
     """变更远端文件/目录的权限 (chmod) 及所有者 (chown)"""
