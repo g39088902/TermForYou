@@ -234,6 +234,38 @@ def run_cmd(cmd, timeout=3):
 
 data = {}
 
+# 1. 服务器时区：crontab 按服务器本地时区触发，前端据此换算为北京时间
+def read_timezone():
+    tz_name = ''
+    try:
+        with open('/etc/timezone') as tz_file:
+            tz_name = tz_file.read().strip()
+    except Exception:
+        tz_name = ''
+    if not tz_name:
+        try:
+            link = os.path.realpath('/etc/localtime')
+            if 'zoneinfo/' in link:
+                tz_name = link.split('zoneinfo/', 1)[1]
+        except Exception:
+            tz_name = ''
+    tz_offset = ''
+    try:
+        tz_offset = time.strftime('%z') or ''
+    except Exception:
+        tz_offset = ''
+    if not tz_offset:
+        minutes = -time.timezone // 60
+        sign = '-' if minutes < 0 else '+'
+        tz_offset = sign + '%02d%02d' % (abs(minutes) // 60, abs(minutes) % 60)
+    try:
+        tz_abbr = time.strftime('%Z') or tz_offset
+    except Exception:
+        tz_abbr = tz_offset
+    return {'name': tz_name or 'unknown', 'abbreviation': tz_abbr, 'utcOffset': tz_offset}
+
+data['timezone'] = read_timezone()
+
 # PROCESS_LIST_CODE
 
 # 2. Docker 容器列表 (Docker Containers)
@@ -404,57 +436,6 @@ def cron_title(value):
         return base64.b64decode(value.encode('ascii')).decode('utf-8')
     except Exception:
         return ''
-def cron_parts(expr):
-    aliases = {
-        '@hourly': ['0', '*', '*', '*', '*'],
-        '@daily': ['0', '0', '*', '*', '*'],
-        '@midnight': ['0', '0', '*', '*', '*'],
-        '@weekly': ['0', '0', '*', '*', '0'],
-        '@monthly': ['0', '0', '1', '*', '*'],
-        '@yearly': ['0', '0', '1', '1', '*'],
-        '@annually': ['0', '0', '1', '1', '*']
-    }
-    if expr in aliases:
-        return aliases[expr]
-    fields = expr.split()
-    return fields[:5] if len(fields) == 5 else None
-def cron_field_match(value, field, minimum, maximum):
-    if field == '*': return True
-    for piece in field.split(','):
-        bits = piece.split('/', 1)
-        base, step = bits[0], int(bits[1]) if len(bits) == 2 and bits[1].isdigit() else 1
-        if step < 1: continue
-        if base == '*': start, end = minimum, maximum
-        elif '-' in base:
-            a, b = base.split('-', 1)
-            if not (a.isdigit() and b.isdigit()): continue
-            start, end = int(a), int(b)
-        elif base.isdigit(): start = end = int(base)
-        else: continue
-        if start <= value <= end and (value - start) % step == 0: return True
-    return False
-def cron_next(expr, count=3):
-    if expr == '@reboot': return ['下次系统重启时']
-    fields = cron_parts(expr)
-    if not fields: return []
-    def allowed(field, minimum, maximum):
-        return [value for value in range(minimum, maximum + 1) if cron_field_match(value, field, minimum, maximum)]
-    minutes, hours = allowed(fields[0], 0, 59), allowed(fields[1], 0, 23)
-    result, now = [], datetime.datetime.now().replace(second=0, microsecond=0)
-    start_day = now.date()
-    for day_offset in range(367):
-        current_day = start_day + datetime.timedelta(days=day_offset)
-        dom = cron_field_match(current_day.day, fields[2], 1, 31)
-        dow = cron_field_match((current_day.weekday() + 1) % 7, fields[4], 0, 7)
-        day_ok = (dom or dow) if fields[2] != '*' and fields[4] != '*' else (dom and dow)
-        if not (day_ok and cron_field_match(current_day.month, fields[3], 1, 12)): continue
-        for hour in hours:
-            for minute in minutes:
-                candidate = datetime.datetime.combine(current_day, datetime.time(hour, minute))
-                if candidate <= now: continue
-                result.append(candidate.strftime('%Y-%m-%d %H:%M:%S'))
-                if len(result) >= count: return result
-    return result
 def cron_task(raw, enabled=True, title='', idx=1):
     parts = raw.split(None, 1)
     if not parts: return None
@@ -468,11 +449,11 @@ def cron_task(raw, enabled=True, title='', idx=1):
     title = title or f'定时计划任务 #{idx}'
     return {
         'id': cron_id(raw), 'engine': 'crontab', 'title': title,
-        'expression': expr, 'naturalLanguage': expr, 'command': cmd,
+        'expression': expr, 'command': cmd,
         'scriptPath': cmd.split()[0] if cmd.startswith('/') else None,
         'user': getpass.getuser(), 'enabled': enabled,
         'lastRunAt': '尚未执行', 'lastExitCode': None,
-        'nextRuns': cron_next(expr), 'lastOutput': '等待首次周期触发...'
+        'lastOutput': '等待首次周期触发...'
     }
 cr_out = run_cmd(['crontab', '-l'], timeout=2)
 if cr_out:
@@ -911,6 +892,7 @@ class HostMetricsService:
                     "auth_method": self._auth_methods.get(host_alias),
                     "timestamp": now,
                     "cwd": inspect_data.get("cwd", "/root"),
+                    "timezone": inspect_data.get("timezone") or {},
                     "metrics": metrics,
                     "processes": inspect_data.get("processes", []),
                     "processesError": inspect_data.get("processesError"),
@@ -975,51 +957,6 @@ def title_decode(value):
     except Exception: return ''
 def title_encode(value):
     return base64.b64encode(value.encode('utf-8')).decode('ascii')
-def fields_for(expr):
-    aliases = {'@hourly':['0','*','*','*','*'],'@daily':['0','0','*','*','*'],'@midnight':['0','0','*','*','*'],'@weekly':['0','0','*','*','0'],'@monthly':['0','0','1','*','*'],'@yearly':['0','0','1','1','*'],'@annually':['0','0','1','1','*']}
-    if expr == '@reboot': return None
-    if expr in aliases: return aliases[expr]
-    parts = expr.split()
-    return parts if len(parts) == 5 else None
-def field_match(value, field, minimum, maximum):
-    if field == '*': return True
-    for piece in field.split(','):
-        bits = piece.split('/', 1)
-        base = bits[0]
-        try: step = int(bits[1]) if len(bits) == 2 else 1
-        except ValueError: continue
-        if step < 1: continue
-        if base == '*': start, end = minimum, maximum
-        elif '-' in base:
-            a, b = base.split('-', 1)
-            if not (a.isdigit() and b.isdigit()): continue
-            start, end = int(a), int(b)
-        elif base.isdigit(): start = end = int(base)
-        else: continue
-        if start <= value <= end and (value - start) % step == 0: return True
-    return False
-def next_runs(expr):
-    if expr == '@reboot': return ['下次系统重启时']
-    fields = fields_for(expr)
-    if not fields: return []
-    def allowed(field, minimum, maximum):
-        return [value for value in range(minimum, maximum + 1) if field_match(value, field, minimum, maximum)]
-    minutes, hours = allowed(fields[0], 0, 59), allowed(fields[1], 0, 23)
-    result, now = [], datetime.datetime.now().replace(second=0, microsecond=0)
-    start_day = now.date()
-    for day_offset in range(367):
-        current_day = start_day + datetime.timedelta(days=day_offset)
-        dom = field_match(current_day.day, fields[2], 1, 31)
-        dow = field_match((current_day.weekday() + 1) % 7, fields[4], 0, 7)
-        day_ok = (dom or dow) if fields[2] != '*' and fields[4] != '*' else (dom and dow)
-        if not (day_ok and field_match(current_day.month, fields[3], 1, 12)): continue
-        for hour in hours:
-            for minute in minutes:
-                candidate = datetime.datetime.combine(current_day, datetime.time(hour, minute))
-                if candidate <= now: continue
-                result.append(candidate.strftime('%Y-%m-%d %H:%M:%S'))
-                if len(result) == 3: return result
-    return result
 def make_task(raw, enabled, title=''):
     parts = raw.split(None, 1)
     if not parts: return None
@@ -1031,9 +968,9 @@ def make_task(raw, enabled, title=''):
         expr, command = ' '.join(cron[:5]), cron[5]
     if not command: return None
     return {'id': task_id(raw), 'engine': 'crontab', 'title': title or '定时计划任务', 'expression': expr,
-            'naturalLanguage': expr, 'command': command, 'scriptPath': command.split()[0] if command.startswith('/') else None,
+            'command': command, 'scriptPath': command.split()[0] if command.startswith('/') else None,
             'user': getpass.getuser(), 'enabled': enabled, 'lastRunAt': '尚未执行', 'lastExitCode': None,
-            'nextRuns': next_runs(expr), 'lastOutput': '等待首次周期触发...'}
+            'lastOutput': '等待首次周期触发...'}
 def read_lines():
     result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
     if result.returncode not in (0, 1):
