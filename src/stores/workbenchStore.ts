@@ -10,6 +10,7 @@ import type {
   ProcessSignal,
   ProcessActionResponse,
   CronTaskItem,
+  ServerTimezone,
   SystemdServiceItem,
   DockerContainerItem,
   DockerActionResponse,
@@ -319,6 +320,8 @@ WantedBy=multi-user.target`
   cronTasks: [] as CronTaskItem[],
   cronTasksLoading: false,
   cronTasksError: '',
+  // 服务器时区；crontab 按服务器本地时间触发，视图据此换算北京时间。
+  serverTimezone: null as ServerTimezone | null,
 
   // Systemd 系统服务列表
   systemdServices: [
@@ -1100,7 +1103,7 @@ function beginInspectionLoad(hostId: string): number {
 function finishInspectionLoad(
   hostId: string,
   version: number,
-  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; processes?: ProcessItem[]; processesError?: string; message?: string }
+  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; processes?: ProcessItem[]; processesError?: string; message?: string; timezone?: ServerTimezone }
 ) {
   if (version !== inspectionRequestVersion || store.activeHostId !== hostId) return
   if (inspectionProcessVersion === processRequestVersion) {
@@ -1114,6 +1117,8 @@ function finishInspectionLoad(
     }
   }
   store.cronTasksLoading = false
+  // 时区随巡检回包更新；回包缺失说明本次未取到，回落为未知，避免沿用上一台主机的时区。
+  store.serverTimezone = data?.timezone?.utcOffset ? data.timezone : null
   if (data?.status === 'ok' && Array.isArray(data.cronTasks)) {
     store.cronTasks = data.cronTasks
     store.cronTasksError = ''
@@ -1441,6 +1446,7 @@ watch(
     store.cronTasks = []
     store.cronTasksError = ''
     store.cronTasksLoading = !!newId
+    store.serverTimezone = null
     store.dockerContainers = []
     store.dockerContainersError = ''
     store.dockerContainersLoading = !!newId

@@ -140,19 +140,25 @@ export interface ProcessItem {
   uptime: string
 }
 
+/** 服务器时区；crontab 按该时区的本地时间触发，前端据此换算北京时间。 */
+export interface ServerTimezone {
+  name: string
+  abbreviation: string
+  /** 形如 `+0800` / `-0500`。 */
+  utcOffset: string
+}
+
 export interface CronTaskItem {
   id: string
   engine: 'crontab' | 'systemd-timer'
   title: string
   expression: string
-  naturalLanguage: string
   command: string
   scriptPath?: string
   user: string
   enabled: boolean
   lastRunAt: string
   lastExitCode: number | null
-  nextRuns: string[]
   lastOutput: string
 }
 
