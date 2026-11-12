@@ -1131,6 +1131,70 @@ function finishInspectionLoad(
   }
 }
 
+type CronTaskMutationResult = {
+  status?: string
+  message?: string
+  detail?: string
+  task?: CronTaskItem
+  exit_code?: number
+  output?: string
+}
+
+async function cronMutationRequest(path: string, body?: Record<string, unknown>): Promise<CronTaskMutationResult | null> {
+  try {
+    const res = await fetch(`http://127.0.0.1:8000${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      ...(body ? { body: JSON.stringify(body) } : {})
+    })
+    const data = await res.json().catch(() => ({})) as CronTaskMutationResult
+    if (!res.ok || data.status !== 'ok') {
+      showToast(data.message || data.detail || `Crontab 操作失败 (HTTP ${res.status})`)
+      return null
+    }
+    return data
+  } catch {
+    showToast('未能连接后端服务，Crontab 状态未改变')
+    return null
+  }
+}
+
+export async function createCronTask(payload: { title: string; expression: string; command: string }): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+  const data = await cronMutationRequest(`/api/v1/ssh/cron/${encodeURIComponent(hostId)}/tasks`, payload)
+  if (!data) return false
+  showToast(data.message || '已写入远端 Crontab')
+  await inspectHost(hostId)
+  return true
+}
+
+export async function setCronTaskEnabled(task: CronTaskItem, enabled: boolean): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+  const data = await cronMutationRequest(
+    `/api/v1/ssh/cron/${encodeURIComponent(hostId)}/tasks/${encodeURIComponent(task.id)}/enabled`,
+    { enabled }
+  )
+  if (!data) return false
+  showToast(data.message || (enabled ? '已启用远端 Crontab 任务' : '已禁用远端 Crontab 任务'))
+  await inspectHost(hostId)
+  return true
+}
+
+export async function runCronTask(task: CronTaskItem): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+  const data = await cronMutationRequest(
+    `/api/v1/ssh/cron/${encodeURIComponent(hostId)}/tasks/${encodeURIComponent(task.id)}/run`
+  )
+  if (!data) return false
+  const exitCode = data.exit_code ?? data.task?.lastExitCode
+  showToast(exitCode === 0 ? `试运行成功：${task.title}` : `试运行结束，退出码 ${exitCode ?? '未知'}：${task.title}`)
+  await inspectHost(hostId)
+  return exitCode === 0
+}
+
 export async function inspectHost(hostId: string) {
   const host = store.hosts.find((h) => h.id === hostId)
   if (!host) return

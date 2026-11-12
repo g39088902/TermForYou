@@ -151,7 +151,7 @@ export interface CronTaskItem {
   user: string
   enabled: boolean
   lastRunAt: string
-  lastExitCode: number
+  lastExitCode: number | null
   nextRuns: string[]
   lastOutput: string
 }

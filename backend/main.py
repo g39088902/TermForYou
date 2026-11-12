@@ -13,6 +13,8 @@ from models import (
     TerminalAuthPayload,
     DockerRestartPayload,
     DockerActionPayload,
+    CronTaskCreatePayload,
+    CronTaskEnabledPayload,
     ProcessSignalPayload,
     CreateHostPayload,
     SetCredentialPayload,
@@ -210,6 +212,41 @@ async def inspect_host_endpoint(host_alias: str):
     if not host_info:
         raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
     return await metrics_service.fetch_full_inspection(host_alias)
+
+@app.post("/api/v1/ssh/cron/{host_alias}/tasks")
+async def create_cron_task(host_alias: str, payload: CronTaskCreatePayload):
+    """在 SSH 登录用户的 crontab 中追加一个真实计划任务。"""
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    result = await metrics_service.create_cron_task(
+        host_alias,
+        title=payload.title,
+        expression=payload.expression,
+        command=payload.command,
+    )
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=result.get("message", "写入 Crontab 失败"))
+    return result
+
+@app.post("/api/v1/ssh/cron/{host_alias}/tasks/{task_id}/enabled")
+async def set_cron_task_enabled(host_alias: str, task_id: str, payload: CronTaskEnabledPayload):
+    """真实注释或恢复指定 Crontab 任务。"""
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    result = await metrics_service.set_cron_task_enabled(host_alias, task_id, payload.enabled)
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=result.get("message", "更新 Crontab 失败"))
+    return result
+
+@app.post("/api/v1/ssh/cron/{host_alias}/tasks/{task_id}/run")
+async def run_cron_task(host_alias: str, task_id: str):
+    """在目标机当前 SSH 用户上下文中立即执行一次指定任务命令。"""
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    result = await metrics_service.run_cron_task(host_alias, task_id)
+    if result.get("status") != "ok":
+        raise HTTPException(status_code=400, detail=result.get("message", "试运行失败"))
+    return result
 
 @app.get("/api/v1/ssh/processes/{host_alias}")
 async def list_processes_endpoint(host_alias: str):

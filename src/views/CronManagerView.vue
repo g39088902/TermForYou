@@ -4,8 +4,10 @@ import {
   store,
   inspectHost,
   openFileInEditor,
-  executeTerminalCommand,
-  showToast
+  showToast,
+  createCronTask,
+  setCronTaskEnabled,
+  runCronTask
 } from '@/stores/workbenchStore'
 import type { CronTaskItem } from '@/types'
 import {
@@ -18,10 +20,10 @@ import {
 } from 'lucide-vue-next'
 
 const cronPresets = [
-  { label: '每 5 分钟', expr: '*/5 * * * *', desc: '每 5 分钟执行一次', next: ['11:15:00', '11:20:00', '11:25:00'] },
-  { label: '每小时整点', expr: '0 * * * *', desc: '每小时第 0 分钟执行', next: ['12:00:00', '13:00:00', '14:00:00'] },
-  { label: '每天凌晨 02:00', expr: '0 2 * * *', desc: '每天 02:00 准时执行', next: ['明日 02:00:00', '后日 02:00:00'] },
-  { label: '每周日凌晨 03:30', expr: '30 3 * * 0', desc: '每周日 03:30 执行', next: ['周日 03:30:00', '下周日 03:30:00'] }
+  { label: '每 5 分钟', expr: '*/5 * * * *', desc: '每 5 分钟执行一次' },
+  { label: '每小时整点', expr: '0 * * * *', desc: '每小时第 0 分钟执行' },
+  { label: '每天凌晨 02:00', expr: '0 2 * * *', desc: '每天 02:00 准时执行' },
+  { label: '每周日凌晨 03:30', expr: '30 3 * * 0', desc: '每周日 03:30 执行' }
 ]
 
 const builderForm = ref({
@@ -31,54 +33,126 @@ const builderForm = ref({
   appendLogRedirect: true
 })
 
+const busyTaskIds = ref<Record<string, boolean>>({})
+const addingTask = ref(false)
+
+function matchesCronField(value: number, field: string, min: number, max: number): boolean {
+  if (field === '*') return true
+  return field.split(',').some((piece) => {
+    const [base, stepText] = piece.split('/')
+    const step = stepText ? Number(stepText) : 1
+    if (!Number.isInteger(step) || step < 1) return false
+    let start = min
+    let end = max
+    if (base === '*') {
+      // Keep the full range.
+    } else if (base.includes('-')) {
+      const [a, b] = base.split('-').map(Number)
+      if (!Number.isInteger(a) || !Number.isInteger(b)) return false
+      start = a
+      end = b
+    } else {
+      start = Number(base)
+      end = start
+    }
+    return value >= start && value <= end && (value - start) % step === 0
+  })
+}
+
+function nextCronRuns(expression: string, count = 3): string[] {
+  const expr = expression.trim()
+  if (expr === '@reboot') return ['下次系统重启时']
+  const aliases: Record<string, string> = {
+    '@hourly': '0 * * * *',
+    '@daily': '0 0 * * *',
+    '@midnight': '0 0 * * *',
+    '@weekly': '0 0 * * 0',
+    '@monthly': '0 0 1 * *',
+    '@yearly': '0 0 1 1 *',
+    '@annually': '0 0 1 1 *'
+  }
+  const fields = (aliases[expr] || expr).split(/\s+/)
+  if (fields.length !== 5) return []
+  const allowed = (field: string, min: number, max: number) =>
+    Array.from({ length: max - min + 1 }, (_, index) => min + index).filter((value) => matchesCronField(value, field, min, max))
+  const minutes = allowed(fields[0], 0, 59)
+  const hours = allowed(fields[1], 0, 23)
+  const result: string[] = []
+  const now = new Date()
+  now.setSeconds(0, 0)
+  for (let dayOffset = 0; dayOffset <= 366 && result.length < count; dayOffset += 1) {
+    const cursor = new Date(now)
+    cursor.setHours(0, 0, 0, 0)
+    cursor.setDate(cursor.getDate() + dayOffset)
+    const dom = matchesCronField(cursor.getDate(), fields[2], 1, 31)
+    const dow = matchesCronField(cursor.getDay(), fields[4], 0, 7)
+    const dayMatches = fields[2] !== '*' && fields[4] !== '*' ? dom || dow : dom && dow
+    if (dayMatches && matchesCronField(cursor.getMonth() + 1, fields[3], 1, 12)) {
+      for (const hour of hours) {
+        for (const minute of minutes) {
+          const candidate = new Date(cursor)
+          candidate.setHours(hour, minute, 0, 0)
+          if (candidate <= now) continue
+          const pad = (value: number) => String(value).padStart(2, '0')
+          result.push(`${candidate.getFullYear()}-${pad(candidate.getMonth() + 1)}-${pad(candidate.getDate())} ${pad(candidate.getHours())}:${pad(candidate.getMinutes())}:00`)
+          if (result.length >= count) break
+        }
+        if (result.length >= count) break
+      }
+    }
+  }
+  return result
+}
+
 const currentNaturalPreview = computed(() => {
   const found = cronPresets.find((p) => p.expr === builderForm.value.expression.trim())
-  if (found) return found
+  if (found) return { ...found, next: nextCronRuns(found.expr) }
   return {
     label: '自定义表达式',
     expr: builderForm.value.expression,
     desc: `按 Cron 表达式 "${builderForm.value.expression}" 周期调度`,
-    next: ['2026-11-11 02:00:00', '2026-11-12 02:00:00', '2026-11-13 02:00:00']
+    next: nextCronRuns(builderForm.value.expression)
   }
 })
 
-function dryRunTask(task: CronTaskItem) {
-  executeTerminalCommand(task.command)
-  task.lastRunAt = '刚刚 (手动试运行)'
-  showToast(`已手动触发试运行任务：${task.title}`)
+async function dryRunTask(task: CronTaskItem) {
+  if (busyTaskIds.value[task.id]) return
+  busyTaskIds.value[task.id] = true
+  try {
+    await runCronTask(task)
+  } finally {
+    delete busyTaskIds.value[task.id]
+  }
 }
 
-function toggleTaskEnabled(task: CronTaskItem) {
-  task.enabled = !task.enabled
-  showToast(
-    task.enabled
-      ? `已取消注释启用计划任务：${task.title}`
-      : `已在 Crontab 中注释禁用计划任务：# ${task.expression}`
-  )
+async function toggleTaskEnabled(task: CronTaskItem) {
+  if (busyTaskIds.value[task.id]) return
+  busyTaskIds.value[task.id] = true
+  try {
+    await setCronTaskEnabled(task, !task.enabled)
+  } finally {
+    delete busyTaskIds.value[task.id]
+  }
 }
 
-function addCronTask() {
+async function addCronTask() {
+  if (addingTask.value) return
+  const expression = builderForm.value.expression.trim()
+  const command = builderForm.value.command.trim()
+  const title = builderForm.value.title.trim()
+  if (!title || !expression || !command) {
+    showToast('任务名称、Cron 表达式和命令不能为空')
+    return
+  }
   const finalCmd = builderForm.value.appendLogRedirect
-    ? `${builderForm.value.command} >> /var/log/cron_job.log 2>&1`
-    : builderForm.value.command
-
-  store.cronTasks.unshift({
-    id: `cron-${Date.now()}`,
-    engine: 'crontab',
-    title: builderForm.value.title,
-    expression: builderForm.value.expression,
-    naturalLanguage: currentNaturalPreview.value.desc,
-    command: finalCmd,
-    scriptPath: builderForm.value.command.startsWith('/') ? builderForm.value.command.split(' ')[0] : undefined,
-    user: 'root',
-    enabled: true,
-    lastRunAt: '尚未执行',
-    lastExitCode: 0,
-    nextRuns: currentNaturalPreview.value.next,
-    lastOutput: '等待首次周期触发...'
-  })
-
-  executeTerminalCommand(`(crontab -l 2>/dev/null; echo "${builderForm.value.expression} ${finalCmd}") | crontab -`)
+    ? `${command} >> /var/log/cron.log 2>&1`
+    : command
+  addingTask.value = true
+  try {
+    await createCronTask({ title, expression, command: finalCmd })
+  } finally {
+    addingTask.value = false
+  }
 }
 </script>
 
@@ -171,6 +245,7 @@ function addCronTask() {
         <button
           type="button"
           @click="addCronTask"
+          :disabled="addingTask"
           class="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold cursor-pointer"
         >
           <Plus class="w-3.5 h-3.5" />
@@ -235,7 +310,7 @@ function addCronTask() {
           <div class="flex items-center gap-4 text-[11px] text-slate-400 font-mono">
             <span class="flex items-center gap-1 text-emerald-400">
               <CheckCircle2 class="w-3.5 h-3.5" />
-              上次运行: {{ task.lastRunAt }} (Exit {{ task.lastExitCode }})
+              上次运行: {{ task.lastRunAt }} (Exit {{ task.lastExitCode ?? '—' }})
             </span>
             <span>下次执行: {{ task.nextRuns[0] }}</span>
             <span class="text-slate-500 truncate">输出摘要: {{ task.lastOutput }}</span>

@@ -40,6 +40,14 @@ class DockerRestartPayload(BaseModel):
 class DockerActionPayload(DockerRestartPayload):
     action: Literal["start", "stop"]
 
+class CronTaskCreatePayload(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    expression: str = Field(min_length=1, max_length=200)
+    command: str = Field(min_length=1, max_length=4000)
+
+class CronTaskEnabledPayload(BaseModel):
+    enabled: bool
+
 class DockerPortInfo(BaseModel):
     hostPort: int = 0  # 0 means exposed in the container but not published on the host
     hostIp: str = ""

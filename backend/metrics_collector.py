@@ -396,31 +396,107 @@ data['systemdServices'] = services
 
 # 4. Crontab 计划任务 (Cron Tasks)
 crons = []
+import base64, hashlib, datetime, getpass
+def cron_id(raw):
+    return 'cron-' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
+def cron_title(value):
+    try:
+        return base64.b64decode(value.encode('ascii')).decode('utf-8')
+    except Exception:
+        return ''
+def cron_parts(expr):
+    aliases = {
+        '@hourly': ['0', '*', '*', '*', '*'],
+        '@daily': ['0', '0', '*', '*', '*'],
+        '@midnight': ['0', '0', '*', '*', '*'],
+        '@weekly': ['0', '0', '*', '*', '0'],
+        '@monthly': ['0', '0', '1', '*', '*'],
+        '@yearly': ['0', '0', '1', '1', '*'],
+        '@annually': ['0', '0', '1', '1', '*']
+    }
+    if expr in aliases:
+        return aliases[expr]
+    fields = expr.split()
+    return fields[:5] if len(fields) == 5 else None
+def cron_field_match(value, field, minimum, maximum):
+    if field == '*': return True
+    for piece in field.split(','):
+        bits = piece.split('/', 1)
+        base, step = bits[0], int(bits[1]) if len(bits) == 2 and bits[1].isdigit() else 1
+        if step < 1: continue
+        if base == '*': start, end = minimum, maximum
+        elif '-' in base:
+            a, b = base.split('-', 1)
+            if not (a.isdigit() and b.isdigit()): continue
+            start, end = int(a), int(b)
+        elif base.isdigit(): start = end = int(base)
+        else: continue
+        if start <= value <= end and (value - start) % step == 0: return True
+    return False
+def cron_next(expr, count=3):
+    if expr == '@reboot': return ['下次系统重启时']
+    fields = cron_parts(expr)
+    if not fields: return []
+    def allowed(field, minimum, maximum):
+        return [value for value in range(minimum, maximum + 1) if cron_field_match(value, field, minimum, maximum)]
+    minutes, hours = allowed(fields[0], 0, 59), allowed(fields[1], 0, 23)
+    result, now = [], datetime.datetime.now().replace(second=0, microsecond=0)
+    start_day = now.date()
+    for day_offset in range(367):
+        current_day = start_day + datetime.timedelta(days=day_offset)
+        dom = cron_field_match(current_day.day, fields[2], 1, 31)
+        dow = cron_field_match((current_day.weekday() + 1) % 7, fields[4], 0, 7)
+        day_ok = (dom or dow) if fields[2] != '*' and fields[4] != '*' else (dom and dow)
+        if not (day_ok and cron_field_match(current_day.month, fields[3], 1, 12)): continue
+        for hour in hours:
+            for minute in minutes:
+                candidate = datetime.datetime.combine(current_day, datetime.time(hour, minute))
+                if candidate <= now: continue
+                result.append(candidate.strftime('%Y-%m-%d %H:%M:%S'))
+                if len(result) >= count: return result
+    return result
+def cron_task(raw, enabled=True, title='', idx=1):
+    parts = raw.split(None, 1)
+    if not parts: return None
+    if parts[0].startswith('@'):
+        expr, cmd = parts[0], parts[1] if len(parts) > 1 else ''
+    else:
+        fields = raw.split(None, 5)
+        if len(fields) < 6: return None
+        expr, cmd = ' '.join(fields[:5]), fields[5]
+    if not cmd: return None
+    title = title or f'定时计划任务 #{idx}'
+    return {
+        'id': cron_id(raw), 'engine': 'crontab', 'title': title,
+        'expression': expr, 'naturalLanguage': expr, 'command': cmd,
+        'scriptPath': cmd.split()[0] if cmd.startswith('/') else None,
+        'user': getpass.getuser(), 'enabled': enabled,
+        'lastRunAt': '尚未执行', 'lastExitCode': None,
+        'nextRuns': cron_next(expr), 'lastOutput': '等待首次周期触发...'
+    }
 cr_out = run_cmd(['crontab', '-l'], timeout=2)
 if cr_out:
-    idx = 1
-    for line in cr_out.splitlines():
-        line = line.strip()
-        if not line or line.startswith('#'): continue
-        parts = line.split(None, 5)
-        if len(parts) >= 6:
-            expr = ' '.join(parts[:5])
-            cmd = parts[5]
-            crons.append({
-                'id': f'cron-real-{idx}',
-                'engine': 'crontab',
-                'title': f'定时计划任务 #{idx}',
-                'expression': expr,
-                'naturalLanguage': expr,
-                'command': cmd,
-                'user': 'root',
-                'enabled': True,
-                'lastRunAt': '已部署运行',
-                'lastExitCode': 0,
-                'nextRuns': ['按 Cron 周期执行'],
-                'lastOutput': '就绪'
-            })
-            idx += 1
+    pending_title, idx = '', 1
+    for raw_line in cr_out.splitlines():
+        line = raw_line.rstrip()
+        stripped = line.strip()
+        if stripped.startswith('# TERMFORYOU_TITLE '):
+            pending_title = cron_title(stripped[len('# TERMFORYOU_TITLE '):].strip())
+            continue
+        if stripped.startswith('# TERMFORYOU_DISABLED '):
+            try:
+                payload = json.loads(base64.b64decode(stripped[len('# TERMFORYOU_DISABLED '):].strip()).decode('utf-8'))
+                task = cron_task(payload.get('raw', ''), False, payload.get('title', '') or pending_title, idx)
+                if task: crons.append(task); idx += 1
+            except Exception:
+                pass
+            pending_title = ''
+            continue
+        if not stripped or stripped.startswith('#'):
+            continue
+        task = cron_task(line, True, pending_title, idx)
+        pending_title = ''
+        if task: crons.append(task); idx += 1
 data['cronTasks'] = crons
 
 # 5. 防火墙真实放行规则 (Firewall Rules)
@@ -566,6 +642,8 @@ class HostMetricsService:
         # 记录主机认证方式缓存 (host_alias -> "password" | "default_key" | "custom_key")
         self._auth_methods: Dict[str, str] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
+        # Crontab 试运行结果仅保存在后端进程内存，不写入 SQLite 或远端配置。
+        self._cron_runtime: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
     def set_credential(self, host_alias: str, password: Optional[str]):
         if password is not None:
@@ -822,6 +900,11 @@ class HostMetricsService:
             if out_str:
                 parsed = json.loads(out_str)
                 inspect_data = parsed.get("data", {})
+                cron_tasks = inspect_data.get("cronTasks", [])
+                for cron_task in cron_tasks:
+                    runtime = self._cron_runtime.get(host_alias, {}).get(cron_task.get("id"))
+                    if runtime:
+                        cron_task.update(runtime)
                 return {
                     "status": "ok",
                     "host_alias": host_alias,
@@ -833,7 +916,7 @@ class HostMetricsService:
                     "processesError": inspect_data.get("processesError"),
                     "dockerContainers": [DockerContainerInfo(**c).model_dump() for c in inspect_data.get("dockerContainers", [])],
                     "systemdServices": inspect_data.get("systemdServices", []),
-                    "cronTasks": inspect_data.get("cronTasks", []),
+                    "cronTasks": cron_tasks,
                     "firewallRules": inspect_data.get("firewallRules", []),
                     "files": inspect_data.get("files", [])
                 }
@@ -878,6 +961,186 @@ class HostMetricsService:
         except Exception as e:
             self._connections.pop(host_alias, None)
             return {"status": "error", "message": str(e)}
+
+    async def _cron_mutation(self, host_alias: str, payload: Dict[str, Any], timeout: float = 12.0) -> Dict[str, Any]:
+        """执行 Crontab 读写/试运行脚本，所有用户输入通过 JSON Base64 传递。"""
+        code = r'''
+import sys, os, json, base64, hashlib, subprocess, datetime, getpass
+payload = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+mode = payload.get('mode', '')
+def task_id(raw):
+    return 'cron-' + hashlib.sha256(raw.encode('utf-8')).hexdigest()[:16]
+def title_decode(value):
+    try: return base64.b64decode(value.encode('ascii')).decode('utf-8')
+    except Exception: return ''
+def title_encode(value):
+    return base64.b64encode(value.encode('utf-8')).decode('ascii')
+def fields_for(expr):
+    aliases = {'@hourly':['0','*','*','*','*'],'@daily':['0','0','*','*','*'],'@midnight':['0','0','*','*','*'],'@weekly':['0','0','*','*','0'],'@monthly':['0','0','1','*','*'],'@yearly':['0','0','1','1','*'],'@annually':['0','0','1','1','*']}
+    if expr == '@reboot': return None
+    if expr in aliases: return aliases[expr]
+    parts = expr.split()
+    return parts if len(parts) == 5 else None
+def field_match(value, field, minimum, maximum):
+    if field == '*': return True
+    for piece in field.split(','):
+        bits = piece.split('/', 1)
+        base = bits[0]
+        try: step = int(bits[1]) if len(bits) == 2 else 1
+        except ValueError: continue
+        if step < 1: continue
+        if base == '*': start, end = minimum, maximum
+        elif '-' in base:
+            a, b = base.split('-', 1)
+            if not (a.isdigit() and b.isdigit()): continue
+            start, end = int(a), int(b)
+        elif base.isdigit(): start = end = int(base)
+        else: continue
+        if start <= value <= end and (value - start) % step == 0: return True
+    return False
+def next_runs(expr):
+    if expr == '@reboot': return ['下次系统重启时']
+    fields = fields_for(expr)
+    if not fields: return []
+    def allowed(field, minimum, maximum):
+        return [value for value in range(minimum, maximum + 1) if field_match(value, field, minimum, maximum)]
+    minutes, hours = allowed(fields[0], 0, 59), allowed(fields[1], 0, 23)
+    result, now = [], datetime.datetime.now().replace(second=0, microsecond=0)
+    start_day = now.date()
+    for day_offset in range(367):
+        current_day = start_day + datetime.timedelta(days=day_offset)
+        dom = field_match(current_day.day, fields[2], 1, 31)
+        dow = field_match((current_day.weekday() + 1) % 7, fields[4], 0, 7)
+        day_ok = (dom or dow) if fields[2] != '*' and fields[4] != '*' else (dom and dow)
+        if not (day_ok and field_match(current_day.month, fields[3], 1, 12)): continue
+        for hour in hours:
+            for minute in minutes:
+                candidate = datetime.datetime.combine(current_day, datetime.time(hour, minute))
+                if candidate <= now: continue
+                result.append(candidate.strftime('%Y-%m-%d %H:%M:%S'))
+                if len(result) == 3: return result
+    return result
+def make_task(raw, enabled, title=''):
+    parts = raw.split(None, 1)
+    if not parts: return None
+    if parts[0].startswith('@'):
+        expr, command = parts[0], parts[1] if len(parts) > 1 else ''
+    else:
+        cron = raw.split(None, 5)
+        if len(cron) < 6: return None
+        expr, command = ' '.join(cron[:5]), cron[5]
+    if not command: return None
+    return {'id': task_id(raw), 'engine': 'crontab', 'title': title or '定时计划任务', 'expression': expr,
+            'naturalLanguage': expr, 'command': command, 'scriptPath': command.split()[0] if command.startswith('/') else None,
+            'user': getpass.getuser(), 'enabled': enabled, 'lastRunAt': '尚未执行', 'lastExitCode': None,
+            'nextRuns': next_runs(expr), 'lastOutput': '等待首次周期触发...'}
+def read_lines():
+    result = subprocess.run(['crontab', '-l'], capture_output=True, text=True, timeout=5)
+    if result.returncode not in (0, 1):
+        raise RuntimeError((result.stderr or '无法读取当前用户 Crontab').strip())
+    return result.stdout.splitlines()
+def write_lines(lines):
+    text = '\n'.join(lines)
+    if text: text += '\n'
+    result = subprocess.run(['crontab', '-'], input=text, capture_output=True, text=True, timeout=5)
+    if result.returncode != 0: raise RuntimeError((result.stderr or '写入 Crontab 失败').strip())
+def entries(lines):
+    found, pending = [], ''
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('# TERMFORYOU_TITLE '):
+            pending = title_decode(stripped[len('# TERMFORYOU_TITLE '):].strip())
+            continue
+        if stripped.startswith('# TERMFORYOU_DISABLED '):
+            try:
+                item = json.loads(base64.b64decode(stripped[len('# TERMFORYOU_DISABLED '):].strip()).decode('utf-8'))
+                raw = item.get('raw', '')
+                task = make_task(raw, False, item.get('title', '') or pending)
+                if task: found.append((index, 'disabled', raw, task, item.get('title', '')))
+            except Exception: pass
+            pending = ''
+            continue
+        if not stripped or stripped.startswith('#'): continue
+        task = make_task(line.rstrip(), True, pending)
+        pending = ''
+        if task: found.append((index, 'active', line.rstrip(), task, task.get('title', '')))
+    return found
+try:
+    lines = read_lines()
+    if mode == 'create':
+        title, expression, command = payload.get('title', ''), payload.get('expression', '').strip(), payload.get('command', '')
+        if any('\n' in value or '\r' in value for value in (title, expression, command)):
+            raise ValueError('标题、表达式和命令不能包含换行')
+        special_expressions = {'@reboot', '@hourly', '@daily', '@midnight', '@weekly', '@monthly', '@yearly', '@annually'}
+        if expression not in special_expressions and len(expression.split()) != 5:
+            raise ValueError('Cron 表达式必须包含 5 个字段，或使用 @reboot/@daily 等特殊表达式')
+        if not command.strip(): raise ValueError('命令不能为空')
+        lines.extend(['# TERMFORYOU_TITLE ' + title_encode(title.strip()), expression + ' ' + command.strip()])
+        write_lines(lines)
+        item = make_task(expression + ' ' + command.strip(), True, title.strip())
+        print(json.dumps({'status':'ok', 'task': item, 'message':'已写入远端 Crontab'}, ensure_ascii=False))
+    elif mode == 'enabled':
+        wanted, enabled = payload.get('task_id', ''), bool(payload.get('enabled'))
+        changed = False
+        for index, kind, raw, task, title in entries(lines):
+            if task['id'] != wanted: continue
+            if enabled and kind == 'disabled':
+                lines[index:index + 1] = ['# TERMFORYOU_TITLE ' + title_encode(title), raw]
+            elif not enabled and kind == 'active':
+                encoded = base64.b64encode(json.dumps({'raw': raw, 'title': title}, ensure_ascii=False).encode('utf-8')).decode('ascii')
+                lines[index:index + 1] = ['# TERMFORYOU_DISABLED ' + encoded]
+            else: continue
+            changed = True
+            break
+        if not changed: raise ValueError('未找到指定的 Crontab 任务，可能已被其他操作修改')
+        write_lines(lines)
+        print(json.dumps({'status':'ok', 'enabled': enabled, 'message': ('已启用' if enabled else '已禁用') + '远端 Crontab 任务'}, ensure_ascii=False))
+    elif mode == 'run':
+        wanted = payload.get('task_id', '')
+        matched = next((task for _, _, _, task, _ in entries(lines) if task['id'] == wanted), None)
+        if not matched: raise ValueError('未找到指定的 Crontab 任务，可能已被删除')
+        started = datetime.datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            result = subprocess.run(['bash', '-lc', matched['command']], capture_output=True, text=True, timeout=60)
+            output = ((result.stdout or '') + (result.stderr or '')).strip()
+            exit_code = result.returncode
+        except subprocess.TimeoutExpired as error:
+            output = ((error.stdout or '') if isinstance(error.stdout, str) else '') + ((error.stderr or '') if isinstance(error.stderr, str) else '')
+            output = (output.strip() + '\n执行超过 60 秒，已终止').strip()
+            exit_code = 124
+        matched.update({'lastRunAt': started, 'lastExitCode': exit_code, 'lastOutput': output[-4000:] or '(无输出)'})
+        print(json.dumps({'status':'ok', 'task': matched, 'exit_code': exit_code, 'output': output[-4000:]}, ensure_ascii=False))
+    else:
+        raise ValueError('不支持的 Crontab 操作')
+except Exception as error:
+    print(json.dumps({'status':'error', 'message': str(error)}, ensure_ascii=False))
+'''
+        # Serialize writes/runs per host so concurrent UI clicks cannot overwrite a newer crontab.
+        async with self._get_lock(host_alias):
+            return await self._run_remote_json_script(host_alias, code, payload, timeout=timeout)
+
+    async def create_cron_task(self, host_alias: str, title: str, expression: str, command: str) -> Dict[str, Any]:
+        return await self._cron_mutation(host_alias, {
+            'mode': 'create', 'title': title, 'expression': expression, 'command': command
+        })
+
+    async def set_cron_task_enabled(self, host_alias: str, task_id: str, enabled: bool) -> Dict[str, Any]:
+        if not re.fullmatch(r'cron-[0-9a-f]{16}', task_id or ''):
+            return {'status': 'error', 'message': '非法的 Crontab 任务标识'}
+        return await self._cron_mutation(host_alias, {'mode': 'enabled', 'task_id': task_id, 'enabled': enabled})
+
+    async def run_cron_task(self, host_alias: str, task_id: str) -> Dict[str, Any]:
+        if not re.fullmatch(r'cron-[0-9a-f]{16}', task_id or ''):
+            return {'status': 'error', 'message': '非法的 Crontab 任务标识'}
+        result = await self._cron_mutation(host_alias, {'mode': 'run', 'task_id': task_id}, timeout=70.0)
+        task = result.get('task') if isinstance(result, dict) else None
+        if result.get('status') == 'ok' and task:
+            self._cron_runtime.setdefault(host_alias, {})[task_id] = {
+                'lastRunAt': task.get('lastRunAt', '刚刚'),
+                'lastExitCode': task.get('lastExitCode'),
+                'lastOutput': task.get('lastOutput', '(无输出)')
+            }
+        return result
 
     async def list_processes(self, host_alias: str) -> Dict[str, Any]:
         code = "import json\ndata = {}\n" + PROCESS_LIST_CODE + "\nprint(json.dumps(dict(status='error' if data.get('processesError') else 'ok', **data)))"
