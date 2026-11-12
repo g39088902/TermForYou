@@ -15,19 +15,18 @@ import {
   Globe,
   Play,
   FileCode2,
-  Plus,
-  CheckCircle2
+  Plus
 } from 'lucide-vue-next'
 
 const cronPresets = [
   { label: '每 5 分钟', expr: '*/5 * * * *' },
   { label: '每小时整点', expr: '0 * * * *' },
-  { label: '每天凌晨 02:00', expr: '0 2 * * *' },
-  { label: '每周日凌晨 03:30', expr: '30 3 * * 0' }
+  { label: '每天 02:00', expr: '0 2 * * *' },
+  { label: '每周日 03:30', expr: '30 3 * * 0' }
 ]
 
 const builderForm = ref({
-  title: '自动清理超过 14 天的 Docker 容器日志',
+  title: '每日数据库备份',
   expression: '0 2 * * *',
   command: '/opt/scripts/backup_db.sh',
   appendLogRedirect: true
@@ -74,22 +73,16 @@ const serverTimezoneText = computed(() => {
   const timezone = store.serverTimezone
   if (!timezone?.utcOffset) return store.cronTasksLoading ? '读取中…' : '未知'
   const offset = parseUtcOffset(timezone.utcOffset)
-  return [
-    timezone.name && timezone.name !== 'unknown' ? timezone.name : '',
-    offset === null ? timezone.utcOffset : formatUtcOffset(offset),
-    timezone.abbreviation && timezone.abbreviation !== timezone.utcOffset ? timezone.abbreviation : ''
-  ]
+  return [timezone.name && timezone.name !== 'unknown' ? timezone.name : '', offset === null ? timezone.utcOffset : formatUtcOffset(offset)]
     .filter(Boolean)
     .join(' · ')
 })
 
-const timezoneSummary = computed(() => {
+/** 与北京时间一致时不再重复提示，只有真正存在时差才说明。 */
+const timezoneDeltaText = computed(() => {
   const offset = serverOffsetMinutes.value
-  if (offset === null) {
-    return store.cronTasksLoading ? '正在读取服务器时区…' : '未能读取服务器时区'
-  }
+  if (offset === null || offset === BEIJING_UTC_OFFSET) return ''
   const delta = offset - BEIJING_UTC_OFFSET
-  if (delta === 0) return '与北京时间一致'
   const abs = Math.abs(delta)
   const span = [abs >= 60 ? `${Math.floor(abs / 60)} 小时` : '', abs % 60 ? `${abs % 60} 分钟` : '']
     .filter(Boolean)
@@ -98,7 +91,9 @@ const timezoneSummary = computed(() => {
 })
 
 function describeCron(expression: string): string {
-  return cronNaturalLanguage(expression, serverOffsetMinutes.value)
+  const text = cronNaturalLanguage(expression, serverOffsetMinutes.value)
+  // 服务器与北京时间相同时，时间点本身无需换算，去掉逐条重复的口径标注。
+  return serverOffsetMinutes.value === BEIJING_UTC_OFFSET ? text.replace(/（北京时间）$/, '') : text
 }
 
 /** 月份与星期的字母别名：crontab 允许 `JAN`、`MON-FRI` 这类写法，解析前先归一化成数字。 */
@@ -328,9 +323,25 @@ function cronNaturalLanguage(expression: string, offsetMinutes: number | null): 
     if (convertible) {
       const start = shiftClock(Number(startHour), 0)
       const end = shiftClock(Number(endHour), 0)
-      time = `北京时间 ${start.text.slice(0, 2)} 点至${end.dayShift > start.dayShift ? '次日 ' : ' '}${end.text.slice(0, 2)} 点，每 ${step} 分钟`
+      // 服务器与北京时间一致时不再重复标注口径，时区栏已说明。
+      const scope = shiftDelta === 0 ? '' : '北京时间 '
+      time = `${scope}${start.text.slice(0, 2)} 点至${end.dayShift > start.dayShift ? '次日 ' : ' '}${end.text.slice(0, 2)} 点，每 ${step} 分钟`
     } else {
-      time = `按服务器时间 ${hour} 时每 ${step} 分钟`
+      time = `${startHour} 点至 ${endHour} 点，每 ${step} 分钟`
+      fixedClock = true
+    }
+  } else if (/^(\d+)-(\d+)$/.test(hour) && /^\d+$/.test(minute)) {
+    // 小时区间 + 固定分钟：区间内每小时执行一次。
+    const [, startHour, endHour] = /^(\d+)-(\d+)$/.exec(hour) ?? []
+    if (convertible) {
+      const start = shiftClock(Number(startHour), Number(minute))
+      const end = shiftClock(Number(endHour), Number(minute))
+      const scope = shiftDelta === 0 ? '' : '北京时间 '
+      time = `${scope}${start.text} 至${end.dayShift > start.dayShift ? '次日 ' : ' '}${end.text} 之间每小时`
+    } else {
+      const clock = Number(minute) === 0 ? '整点' : `的第 ${pad2(Number(minute))} 分钟`
+      time = `${startHour} 点至 ${endHour} 点每小时${clock}`
+      fixedClock = true
     }
   } else {
     time = `按服务器时间 ${hour} 时 ${minute} 分的周期`
@@ -383,22 +394,18 @@ function cronNaturalLanguage(expression: string, offsetMinutes: number | null): 
     : ''
   if (!hasDateRestriction && (time === '每分钟' || time.startsWith('每小时') || /^每 \d+ (?:分钟|小时)/.test(time))) return `${time}执行${timezoneNote}`
   // 「每 10 分钟」「每 2 小时」这类以频率收尾的短语，与「执行」之间不再多插一个空格。
-  const connector = /(?:分钟|小时)$/.test(time) ? '' : ' '
+  const connector = /(?:分钟|小时|整点)$/.test(time) ? '' : ' '
   return `${schedule} ${time}${connector}执行${timezoneNote}`
 }
 
-const currentNaturalPreview = computed(() => {
-  const found = cronPresets.find((p) => p.expr === builderForm.value.expression.trim())
-  if (found) return { ...found, desc: describeCron(found.expr) }
-  return {
-    label: '自定义表达式',
-    expr: builderForm.value.expression,
-    desc: describeCron(builderForm.value.expression)
-  }
-})
+const currentDescription = computed(() => describeCron(builderForm.value.expression))
+
+function isInvalidExpression(expression: string): boolean {
+  return parseCronExpression(expression).kind === 'error'
+}
 
 /** 表达式非法时预览改用警示色，避免用户把错误文案当成可用配置。 */
-const currentExpressionInvalid = computed(() => parseCronExpression(builderForm.value.expression).kind === 'error')
+const currentExpressionInvalid = computed(() => isInvalidExpression(builderForm.value.expression))
 
 async function dryRunTask(task: CronTaskItem) {
   if (busyTaskIds.value[task.id]) return
@@ -452,15 +459,10 @@ async function addCronTask() {
     <!-- 上半区：Cron 可视化构建器 (自然语言实时翻译) -->
     <div class="rounded-xl bg-slate-900/90 border border-slate-800 p-4 space-y-4">
       <div class="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h1 class="text-sm font-bold text-slate-100 flex items-center gap-2">
-            <CalendarClock class="w-4 h-4 text-cyan-400" />
-            <span>计划任务管理</span>
-          </h1>
-          <p class="text-xs text-slate-400 mt-0.5">
-            Crontab 表达式构建与自然语言解释。
-          </p>
-        </div>
+        <h1 class="text-sm font-bold text-slate-100 flex items-center gap-2">
+          <CalendarClock class="w-4 h-4 text-cyan-400" />
+          <span>计划任务管理</span>
+        </h1>
 
         <!-- 快捷预设胶囊 -->
         <div class="flex items-center gap-1.5 flex-wrap">
@@ -470,48 +472,36 @@ async function addCronTask() {
             type="button"
             @click="builderForm.expression = preset.expr"
             :class="[
-              'px-2.5 py-1 rounded-md text-xs font-mono border transition cursor-pointer',
+              'px-2.5 py-1 rounded-md text-xs border transition cursor-pointer',
               builderForm.expression === preset.expr
                 ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500/50'
                 : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-slate-200'
             ]"
           >
-            {{ preset.label }} ({{ preset.expr }})
+            {{ preset.label }}
           </button>
         </div>
       </div>
 
       <!-- 服务器时区：crontab 按服务器本地时区触发，提示语统一换算为北京时间 -->
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-[11px]">
-        <span class="flex items-center gap-1.5 font-medium text-slate-400">
-          <Globe class="w-3.5 h-3.5 text-cyan-400" />
-          <span>服务器时区</span>
-        </span>
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-slate-800 bg-slate-950/60 px-3 py-2 text-[11px]">
+        <Globe class="w-3.5 h-3.5 text-cyan-400" />
+        <span class="text-slate-400">服务器时区</span>
         <span class="font-mono font-semibold text-cyan-300">{{ serverTimezoneText }}</span>
-        <span
-          :class="[
-            'px-1.5 py-0.5 rounded border',
-            serverOffsetMinutes === null
-              ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
-              : serverOffsetMinutes === BEIJING_UTC_OFFSET
-                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-                : 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300'
-          ]"
-        >
-          {{ timezoneSummary }}
+        <span v-if="timezoneDeltaText" class="px-1.5 py-0.5 rounded border border-cyan-500/30 bg-cyan-500/10 text-cyan-300">
+          {{ timezoneDeltaText }}，时间已换算
         </span>
-        <span v-if="serverOffsetMinutes !== null" class="ml-auto flex items-center gap-1.5 text-slate-500">
-          <span class="hidden sm:inline">提示语按</span>
-          <span class="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-[10px] text-emerald-300">
-            北京时间 UTC+08:00
-          </span>
-          <span class="hidden sm:inline">标注</span>
+        <span
+          v-else-if="serverOffsetMinutes === null && !store.cronTasksLoading"
+          class="px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/10 text-amber-300"
+        >
+          无法换算
         </span>
       </div>
 
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 text-xs">
         <div class="space-y-1.5">
-          <label class="h-5 flex items-center text-slate-400">任务备注名称</label>
+          <label class="h-5 flex items-center text-slate-400">任务名称</label>
           <input
             v-model="builderForm.title"
             type="text"
@@ -527,8 +517,8 @@ async function addCronTask() {
                 'min-w-0 max-w-[55%] shrink-0 truncate text-right font-semibold',
                 currentExpressionInvalid ? 'text-rose-400' : 'text-emerald-400'
               ]"
-              :title="currentNaturalPreview.desc"
-            >{{ currentNaturalPreview.desc }}</span>
+              :title="currentDescription"
+            >{{ currentDescription }}</span>
           </label>
           <input
             v-model="builderForm.expression"
@@ -538,7 +528,7 @@ async function addCronTask() {
         </div>
 
         <div class="space-y-1.5">
-          <label class="h-5 flex items-center text-slate-400">执行脚本路径或 Shell 命令</label>
+          <label class="h-5 flex items-center text-slate-400">执行命令</label>
           <input
             v-model="builderForm.command"
             type="text"
@@ -548,21 +538,19 @@ async function addCronTask() {
       </div>
 
       <div class="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800 text-xs">
-        <div class="flex items-center gap-4">
-          <label class="flex items-center gap-1.5 text-slate-300 cursor-pointer">
-            <input v-model="builderForm.appendLogRedirect" type="checkbox" class="rounded" />
-            <span>自动追加标准输出与错误日志重定向 (<code>&gt;&gt; /var/log/cron.log 2&gt;&amp;1</code>)</span>
-          </label>
-        </div>
+        <label class="flex items-center gap-1.5 text-slate-300 cursor-pointer">
+          <input v-model="builderForm.appendLogRedirect" type="checkbox" class="rounded" />
+          <span>输出追加到 <code>/var/log/cron.log</code></span>
+        </label>
 
         <button
           type="button"
           @click="addCronTask"
           :disabled="addingTask"
-          class="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-semibold cursor-pointer"
+          class="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white font-semibold cursor-pointer"
         >
           <Plus class="w-3.5 h-3.5" />
-          <span>写入 Crontab 并开启监控</span>
+          <span>{{ addingTask ? '写入中…' : '写入 Crontab' }}</span>
         </button>
       </div>
     </div>
@@ -570,14 +558,14 @@ async function addCronTask() {
     <!-- 下半区：计划任务列表 -->
     <div class="space-y-3" :aria-busy="store.cronTasksLoading">
       <p v-if="store.cronTasksLoading" role="status" class="text-xs text-slate-400">
-        正在读取当前服务器的计划任务…
+        正在读取计划任务…
       </p>
       <div v-else-if="store.cronTasksError" role="alert" class="rounded-xl border border-rose-500/30 bg-rose-500/15 p-4 text-xs text-rose-300">
         {{ store.cronTasksError }}
         <button type="button" class="ml-3 underline cursor-pointer" @click="inspectHost(store.activeHostId)">重试</button>
       </div>
       <p v-else-if="store.cronTasks.length === 0" role="status" class="rounded-xl border border-slate-800 p-4 text-xs text-slate-400">
-        当前服务器的 SSH 用户未配置 Crontab 任务。
+        当前服务器没有计划任务。
       </p>
       <div
         v-for="task in store.cronTasks"
@@ -586,21 +574,16 @@ async function addCronTask() {
       >
         <div class="space-y-2 flex-1">
           <div class="flex items-center gap-2.5 flex-wrap">
-            <span
-              :class="[
-                'px-2 py-0.5 text-[10px] rounded font-mono font-semibold',
-                task.engine === 'crontab'
-                  ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30'
-                  : 'bg-indigo-500/15 text-indigo-300 border border-indigo-500/30'
-              ]"
-            >
-              {{ task.engine.toUpperCase() }}
-            </span>
+            <h2 class="text-sm font-bold text-slate-100">{{ task.title }}</h2>
             <span class="px-2.5 py-0.5 rounded bg-slate-950 border border-slate-700 font-mono text-xs text-amber-300 font-bold">
               {{ task.expression }}
             </span>
-            <span class="text-xs text-emerald-400 font-medium">{{ describeCron(task.expression) }}</span>
-            <h2 class="text-sm font-bold text-slate-100">{{ task.title }}</h2>
+            <span
+              :class="[
+                'text-xs font-medium',
+                isInvalidExpression(task.expression) ? 'text-rose-400' : 'text-emerald-400'
+              ]"
+            >{{ describeCron(task.expression) }}</span>
           </div>
 
           <div class="flex items-center gap-2 flex-wrap">
@@ -616,16 +599,21 @@ async function addCronTask() {
               class="flex items-center gap-1 px-2.5 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 text-xs cursor-pointer"
             >
               <FileCode2 class="w-3.5 h-3.5" />
-              <span>直接编辑脚本 {{ task.scriptPath }}</span>
+              <span>编辑脚本</span>
             </button>
           </div>
 
-          <div class="flex items-center gap-4 text-[11px] text-slate-400 font-mono">
-            <span class="flex items-center gap-1 text-emerald-400">
-              <CheckCircle2 class="w-3.5 h-3.5" />
-              上次运行: {{ task.lastRunAt }} (Exit {{ task.lastExitCode ?? '—' }})
+          <div
+            v-if="typeof task.lastExitCode === 'number'"
+            class="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-slate-400"
+          >
+            <span :title="serverOffsetMinutes === BEIJING_UTC_OFFSET ? '' : '服务器本地时间'">
+              上次试运行 {{ task.lastRunAt }}
             </span>
-            <span class="text-slate-500 truncate">输出摘要: {{ task.lastOutput }}</span>
+            <span :class="task.lastExitCode === 0 ? 'text-emerald-400' : 'text-rose-400'">
+              退出码 {{ task.lastExitCode ?? '—' }}
+            </span>
+            <span class="truncate text-slate-500" :title="task.lastOutput">{{ task.lastOutput }}</span>
           </div>
         </div>
 
@@ -633,15 +621,17 @@ async function addCronTask() {
           <button
             type="button"
             @click="dryRunTask(task)"
+            title="立即执行一次该命令"
             class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-cyan-300 font-medium cursor-pointer"
           >
             <Play class="w-3.5 h-3.5" />
-            <span>立即试运行一次</span>
+            <span>试运行</span>
           </button>
 
           <button
             type="button"
             @click="toggleTaskEnabled(task)"
+            :title="task.enabled ? '点击禁用' : '点击启用'"
             :class="[
               'px-3 py-1.5 rounded-lg text-xs font-semibold cursor-pointer border',
               task.enabled
@@ -649,7 +639,7 @@ async function addCronTask() {
                 : 'bg-slate-800 text-slate-400 border-slate-700'
             ]"
           >
-            {{ task.enabled ? '已启用 (点击注释禁用)' : '已注释禁用' }}
+            {{ task.enabled ? '已启用' : '已禁用' }}
           </button>
         </div>
       </div>
