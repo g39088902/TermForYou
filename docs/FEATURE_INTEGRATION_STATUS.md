@@ -102,7 +102,7 @@
 | **Docker Exec 终端** | `WS /ws/terminal/{host_alias}`，auth 中的 `docker_container` / `sudo` | 在远端 SSH PTY 直接运行固定的 `docker exec -it -- <container> /bin/sh`，支持键盘、尺寸同步、重连和退出；未运行的容器禁用入口 | `P5_DOCKER` 页内专用终端 |
 | **Docker 容器物理删除** | `DELETE /api/v1/ssh/docker/{host_alias}/containers/{container}` | 带容器名正则白名单校验，调用 `docker rm [-f] [-v]` 真实删除；当前路由没有 `sudo` 参数，普通命令失败后后端会自动尝试 `sudo -n`，与项目“只由用户显式勾选 sudo”的约束不一致 | `P5_DOCKER` 容器删除按钮 |
 | **Systemd 服务名称、描述和状态** | `GET /api/v1/ssh/inspect/{host_alias}` | `systemctl list-units` 提取前 35 项；`enabled` 由加载状态推断，内存、工作目录、启动命令、重启策略和日志为占位或空值 | `P6_SYSTEMD` 服务列表 |
-| **当前用户 Crontab 表达式和命令** | `GET /api/v1/ssh/inspect/{host_alias}` | `crontab -l` 提取当前 SSH 用户的活动与 TermForYou 管理的禁用任务；标题、用户、下次运行时间按真实行和当前时间计算，试运行结果保存在后端内存 | `P7_CRON` 任务清单 |
+| **当前用户 Crontab 表达式和命令** | `GET /api/v1/ssh/inspect/{host_alias}` | `crontab -l` 提取当前 SSH 用户的活动与 TermForYou 管理的禁用任务；标题、用户按真实行解析，试运行结果保存在后端内存 | `P7_CRON` 任务清单 |
 | **部分防火墙规则** | `GET /api/v1/ssh/inspect/{host_alias}` | 解析 `ufw` / `firewall-cmd` / `iptables`；来源 CIDR、备注等多处填固定值，页面“监听端口是否放行”未做真实规则比对 | `P8_FIREWALL` 规则清单 |
 
 ---
@@ -118,8 +118,9 @@
 | **失败与重试** | HTTP/网络失败、认证失败、`partial` 或缺少有效任务数组时，清空列表并显示读取错误；“重试”重新调用当前服务器的巡检接口。全量巡检失败时不会把后端兜底空数组显示成“未配置任务”。 |
 | **过期响应拦截** | 写入前同时校验主机与请求序号；覆盖切换 A→B→A、同主机请求乱序、旧请求晚失败、非当前主机后台探测、关闭会话后返回等情况。单主机探测返回的任务也经过同样处理。 |
 | **刷新时机** | 切换主机、再次手动连接当前主机、手动探测/重试，以及自动批量探测完成后，均可触发任务更新。切换会立即发出请求，列表仍需等待 SSH 全量采集完成；没有按主机缓存任务。 |
+| **服务器时区与北京时间** | 巡检脚本读取 `/etc/timezone`、`/etc/localtime` 并回退到 `date` 偏移，返回 `timezone{name, abbreviation, utcOffset}`；窗口顶部展示该时区与北京时间的时差。自然语言解释按服务器偏移换算为北京时间，跨零点标注“次日/前一日”；时区未取到时文案标注为服务器本地时间，不做伪换算。 |
 
-采集范围仍为 **SSH 登录用户的 `crontab -l`**，未采集系统级计划任务、其他用户的 crontab 或 systemd timers。新增任务会写入带标题元数据的真实 crontab 行；禁用任务会转换为可恢复的专用注释；下次执行时间由 Cron 字段计算，试运行的时间、退出码和输出摘要保存在后端进程内存中。
+采集范围仍为 **SSH 登录用户的 `crontab -l`**，未采集系统级计划任务、其他用户的 crontab 或 systemd timers。新增任务会写入带标题元数据的真实 crontab 行；禁用任务会转换为可恢复的专用注释；试运行的时间、退出码和输出摘要保存在后端进程内存中。
 
 ---
 
@@ -204,7 +205,6 @@
   - **新增计划任务**：`POST /api/v1/ssh/cron/{host_alias}/tasks` 在目标机当前 SSH 用户的 Crontab 中追加任务和标题元数据；写入后重新巡检。
   - **启用/禁用任务**：`POST /api/v1/ssh/cron/{host_alias}/tasks/{task_id}/enabled` 通过原始行 SHA-256 标识任务，禁用时保存可恢复的编码行，启用时恢复原始行。
   - **试运行任务**：`POST /api/v1/ssh/cron/{host_alias}/tasks/{task_id}/run` 在目标机当前 SSH 用户下用 `bash -lc` 执行命令，返回真实退出码和输出摘要；命令最长运行 60 秒。
-  - **执行预测**：前后端均按 Cron 字段计算未来触发时间，支持 `@reboot`、`@daily` 等特殊表达式和常见列表、范围、步长写法。
 
 ---
 
@@ -231,7 +231,7 @@
 | `P4_COMMANDS` 命令库 | 本地正则聚类与参数化模板 UI 可运行，无后端数据源 | 初始 22 条历史样本、4 条模板；LLM 语义润色是假；模板不持久化，执行入口只记录本地命令历史 |
 | `P5_DOCKER` 容器 | 容器列表、网络模式/端口与挂载、重启策略/健康/资源限制等展开参数；真实启停/重启/删除和 Exec PTY；列表切换隔离与错误重试；已移除 docker run 部署窗口 | 无 shell 镜像不支持 Exec；列表读取依赖 SSH 用户的 Docker 权限 |
 | `P6_SYSTEMD` 服务 | 非空巡检时服务名称、描述、状态 | 服务详情多个字段为占位；启停/重启/新建是假操作 |
-| `P7_CRON` 计划任务 | 当前用户 crontab 真实读取、写入、启禁用、试运行与未来触发预测；切换主机立即巡检并隔离过期回包 | 未采集系统级计划任务、其他用户 crontab 或 systemd timer；试运行结果仅保存在后端内存 |
+| `P7_CRON` 计划任务 | 当前用户 crontab 真实读取、写入、启禁用、试运行；切换主机立即巡检并隔离过期回包 | 未采集系统级计划任务、其他用户 crontab 或 systemd timer；试运行结果仅保存在后端内存 |
 | `P8_FIREWALL` 防火墙 | 防火墙类型/状态及部分规则采集 | 来源/备注有占位；监听端口放行未真实比对；添加规则是假操作 |
 | 公共 Mini HUD | 当前主机轻量指标轮询 | 无独立假数据源，依赖主机指标请求 |
 
