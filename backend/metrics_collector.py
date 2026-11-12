@@ -292,8 +292,7 @@ if shutil.which('docker'):
                             parsed_ports.append({
                                 'hostPort': int(binding.get('HostPort') or 0) if binding else 0,
                                 'hostIp': binding.get('HostIp', '') if binding else '',
-                                'containerPort': int(port), 'protocol': proto,
-                                'firewallAllowed': None
+                                'containerPort': int(port), 'protocol': proto
                             })
                 elif cports:
                     for p in cports.split(','):
@@ -315,8 +314,7 @@ if shutil.which('docker'):
                             parsed_ports.append({
                                 'hostPort': h_port,
                                 'containerPort': c_port or h_port,
-                                'protocol': proto,
-                                'firewallAllowed': None
+                                'protocol': proto
                             })
                 restart = detail.get('.HostConfig.RestartPolicy') or {}
                 nanos = detail.get('.HostConfig.NanoCpus') or 0
@@ -335,8 +333,6 @@ if shutil.which('docker'):
                     'name': cname,
                     'image': cimg,
                     'status': cstate.lower() if cstate.lower() in ('running', 'exited', 'restarting', 'created', 'paused', 'removing', 'dead') else 'unknown',
-                    'cpuPercent': None,
-                    'memMb': None,
                     'ports': parsed_ports,
                     'volumes': volumes,
                     'diskUsage': csize,

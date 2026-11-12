@@ -194,15 +194,12 @@ export interface DockerContainerItem {
   name: string
   image: string
   status: 'running' | 'exited' | 'restarting' | 'created' | 'paused' | 'removing' | 'dead' | 'unknown'
-  cpuPercent: number | null
-  memMb: number | null
   ports: Array<{
     /** 0 表示仅容器内暴露，未发布至宿主机。 */
     hostPort: number
     hostIp?: string
     containerPort: number
     protocol: 'tcp' | 'udp' | 'sctp'
-    firewallAllowed: boolean | null
   }>
   volumes: Array<{
     hostPath: string

@@ -28,7 +28,7 @@ const newRule = ref({
   comment: store.lastJumpContext?.prefillFirewallComment ?? 'API Core Public Port'
 })
 
-// 当从其他页面（如 P2 进程监控 或 P5 Docker）点击未放行端口跳转过来时，自动预填端口号
+// 从进程监控或 Docker 页面点击端口跳转时，自动预填端口号
 watch(
   () => store.lastJumpContext,
   (ctx) => {
@@ -82,14 +82,6 @@ function applyNewFirewallRule() {
   const matchingProc = store.processes.find((p) => p.listenPort === portNum)
   if (matchingProc && newRule.value.action === 'ALLOW') {
     matchingProc.firewallAllowed = true
-  }
-
-  for (const c of store.dockerContainers) {
-    for (const pt of c.ports) {
-      if (pt.hostPort === portNum && newRule.value.action === 'ALLOW') {
-        pt.firewallAllowed = true
-      }
-    }
   }
 
   store.firewallRules.unshift({

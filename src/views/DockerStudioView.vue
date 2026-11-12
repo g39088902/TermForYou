@@ -205,7 +205,7 @@ async function confirmRemove(name: string, running: boolean) {
                 </div>
               </td>
 
-              <!-- 端口映射与防火墙状态联动 -->
+              <!-- 端口映射 -->
               <td class="py-3 px-3 align-top border-b border-slate-800">
                 <span :class="['inline-block mb-2 px-1.5 py-0.5 rounded font-mono', c.networkMode === 'host' ? 'bg-sky-500/15 text-sky-300' : 'bg-slate-800 text-slate-300']">{{ c.networkMode || '网络未读取' }}</span>
                 <p v-if="c.networkMode === 'host'" class="text-slate-400 text-[11px]">共享宿主机网络</p>
@@ -216,7 +216,7 @@ async function confirmRemove(name: string, running: boolean) {
                     v-if="p.hostPort && p.protocol !== 'sctp'"
                     type="button"
                     @click="openPort(c, p)"
-                    :title="`${p.hostIp || '宿主机'}:${p.hostPort} → ${p.containerPort}/${p.protocol}；点击查看防火墙规则，放行状态未核验`"
+                    :title="`${p.hostIp || '宿主机'}:${p.hostPort} → ${p.containerPort}/${p.protocol}；点击查看防火墙规则`"
                     class="max-w-full break-all text-left px-2 py-0.5 rounded font-mono text-[11px] border bg-sky-500/15 text-sky-300 border-sky-500/30 hover:bg-sky-500/25 cursor-pointer"
                   >
                     {{ p.hostIp?.includes(':') ? `[${p.hostIp}]` : p.hostIp || '*' }}:{{ p.hostPort }}→{{ p.containerPort }}/{{ p.protocol }}

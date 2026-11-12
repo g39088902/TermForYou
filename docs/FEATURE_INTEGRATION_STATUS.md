@@ -1,19 +1,9 @@
 # TermForYou 前后端功能联调与实装状态清单
 
-> **更新时间**：2026-11-11
+> **更新时间**：2026-11-12
 > **文档定位**：按当前代码调用链盘点前后端已接线功能、只读接线功能和假数据/假操作。这里的“已接线”指前端确实调用了对应后端接口，不代表已对每台目标主机完成实机验收。
 
 ---
-
-本次已调整功能（2026-11-11）：
-
-| 功能 | 当前状态 |
-| :--- | :--- |
-| 公共随行终端、独立日志窗 | 已删除组件/窗口、顶部与 Mini HUD 入口、快捷键、关联状态和模拟输出；命令面板中的“在随行终端执行”入口也已移除。 |
-| 计划任务切换服务器 | 切换立即清空旧任务并发起巡检，显示加载状态；接受真实空列表，读取失败支持重试，拦截过期响应。详见 2.6。 |
-| Docker 启动 / 停止 / 重启 / Exec | 启停与重启接入真实 SSH 命令并刷新列表，同容器操作互斥，停止/重启需确认；Exec 在 Docker 页内通过 WebSocket PTY 打开容器 `/bin/sh`，点击后自动滚到顶部终端。sudo 默认关闭，需显式勾选。 |
-| Docker 运行参数 | 网络模式、重启策略与健康状态常显；逐容器展开网络/IP、资源限制、运行记录、隔离权限和 Compose 归属。批量采集真实参数；挂载区显示 RO/RW 与 tmpfs，区分已发布和仅暴露端口；移除伪造资源占用和防火墙放行标记。 |
-| 命令记录 | `executeTerminalCommand` 已移除伪造输出、退出码和耗时逻辑；仍只记录本地命令历史、处理部分导航，不向 SSH 发送命令。 |
 
 ## 一、 判定口径与现状
 
@@ -81,10 +71,10 @@
 | 功能点 | 前端位置 | 后端端点 / 协议 | 实装说明与底层机制 |
 | :--- | :--- | :--- | :--- |
 | **远程目录列表浏览** | `FileManagerView.vue`<br>`workbenchStore.ts` | `GET /api/v1/ssh/files/{host_alias}/list` | 支持绝对路径与 `~` 展开，获取文件权限位、八进制 `mode`、大小、所有者、修改时间及软链接指向。 |
-| **目录体积占用分析 (ncdu)** | `FileManagerView.vue`<br>`workbenchStore.ts` | `GET /api/v1/ssh/files/{host_alias}/du` | 异步分析目录下各子目录体积分布并更新容量缓存。 |
+| **目录体积占用分析（类 ncdu）** | `FileManagerView.vue`<br>`workbenchStore.ts` | `GET /api/v1/ssh/files/{host_alias}/du` | 远端脚本实际调用 `du`（GNU/BusyBox 回退）分析目录下各子目录体积分布，并更新容量缓存；没有调用 `ncdu`。 |
 | **单个目录体积测算** | `FileManagerView.vue`<br>`workbenchStore.ts` | `POST /api/v1/ssh/files/{host_alias}/single-dir-size` | 后台执行 `du -sb` 测算特定受保护文件夹体积，支持 `sudo`。 |
 | **在线读取远程文件内容** | `FileEditorDrawer.vue`<br>`workbenchStore.ts` | `GET /api/v1/ssh/files/{host_alias}/content` | 读取文本文件至抽屉，自动识别二进制文件拦截，支持只读文件 `sudo` 读取。 |
-| **在线编辑保存文件内容** | `FileEditorDrawer.vue`<br>`workbenchStore.ts` | `PUT /api/v1/ssh/files/{host_alias}/content` | 保存文本内容写回远端，支持 `sudo_write`。当前前端对 `/etc`、`/lib`、`/usr` 路径自动预选 sudo，尚不符合项目“只由用户显式勾选”的约束。 |
+| **在线编辑保存文件内容** | `FileEditorDrawer.vue`<br>`workbenchStore.ts` | `PUT /api/v1/ssh/files/{host_alias}/content` | 保存文本内容写回远端，支持 `sudo_write`。当前前端对 `/etc`、`/lib`、`/usr` 路径自动预选 sudo；后端未勾选时遇到权限错误也会自动回退 `sudo -n`，均不符合项目“只由用户显式勾选”的约束。 |
 | **新建空白文件 (touch)** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/touch` | 远端新建空白或带初始内容的文件，支持 `sudo`。 |
 | **新建文件夹 (mkdir)** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/mkdir` | 远端递归创建目录，支持权限模式与 `sudo`。 |
 | **重命名与文件移动 (mv)** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/rename` | 前端提交新旧路径，后端经 SSH 执行远端操作。 |
@@ -92,8 +82,10 @@
 | **删除文件/目录 (rm)** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/delete` | 删除选中文档或文件夹，带 `/`、`/etc` 等核心系统目录防误删保护，支持 `sudo`。 |
 | **修改权限与所有者** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/chmod` | 修改八进制权限码（如 `0755`）及 `owner:group`，支持递归应用与 `sudo`。 |
 | **归档打包与解压缩** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/archive` | 支持多选文件打包为 `.tar.gz`，或解压归档文件至目标路径。 |
-| **本地文件上传** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/upload` | 浏览器发送文件二进制内容到后端，再写入远端。当前前端对 `/etc`、`/lib`、`/usr` 目录自动带 `sudo=true`，尚不符合项目约束。 |
+| **本地文件上传** | `FileManagerView.vue` | `POST /api/v1/ssh/files/{host_alias}/upload` | 浏览器发送文件二进制内容到后端，再写入远端。当前前端对 `/etc`、`/lib`、`/usr` 目录自动带 `sudo=true`；后端 `cat` 写入失败时还会自动回退 `sudo -n tee`，尚不符合项目约束。 |
 | **单文件 / 批量压缩下载** | `FileManagerView.vue` | `GET /api/v1/ssh/files/{host_alias}/download`；`POST /api/v1/ssh/files/{host_alias}/download-batch` | 单文件/目录下载，以及多项打包下载均已接线；后端另有批量 GET 路由，前端未使用。 |
+
+**权限核查补充**：除编辑器和上传路径的前端自动预选外，后端的目录列表/文件读取、`mkdir`、`rename`、`copy`、`delete`、`chmod`、上传和下载实现也存在权限失败后的 `sudo -n` 自动回退；这些路径当前都没有做到“仅在用户显式勾选后提权”。
 
 ---
 
@@ -104,11 +96,11 @@
 | :--- | :--- | :--- | :--- |
 | **进程列表与端口映射** | `GET /api/v1/ssh/processes/{host_alias}`，亦包含在 `inspect` | `/proc` 采集进程及启动标识，兼容无完整 `ps` 的主机；`ss` 可选，缺失时仅降级监听信息。按自启动以来平均 CPU 排序前 100 项，每个 PID 保留一个监听端口；防火墙状态为未知，CWD 读取不到不伪造路径 | `P2_METRICS_PROCESS` 真实进程表格，5 秒刷新和手动刷新 |
 | **进程停止/强杀** | `POST /api/v1/ssh/processes/{host_alias}/kill` | 仅 SIGTERM/SIGKILL；PID、启动标识校验，确认后执行；sudo 默认关闭，失败不自动提权，操作后重新读取真实状态 | `P2_METRICS_PROCESS` 信号管控 |
-| **Docker 容器列表与挂载卷** | `GET /api/v1/ssh/inspect/{host_alias}` | `docker ps -a` + 单次批量 `docker inspect`（最多 25 个容器）提供容器、端口、挂载及运行参数；CPU%/内存占用和防火墙放行状态返回 `null`，页面展示真实资源限制与中性端口入口 | `P5_DOCKER` 容器管理列表 |
+| **Docker 容器列表与挂载卷** | `GET /api/v1/ssh/inspect/{host_alias}` | `docker ps -a` + 单次批量 `docker inspect`（最多 25 个容器）提供容器、端口、挂载及运行参数；页面展示真实资源限制与端口映射，不伪造实时资源或防火墙放行结果 | `P5_DOCKER` 容器管理列表 |
 | **Docker 容器启动/停止** | `POST /api/v1/ssh/docker/{host_alias}/containers/{container}/action`，JSON `{action: "start" 或 "stop", sudo: false}` | 校验操作与容器名称/ID；执行 `docker start -- <container>` 或 `docker stop -t 10 -- <container>`，返回真实退出码；停止前确认，成功后巡检刷新，同容器生命周期操作互斥 | `P5_DOCKER` 每行启动/停止按钮 |
 | **Docker 容器重启** | `POST /api/v1/ssh/docker/{host_alias}/containers/{container}/restart` | 名称/ID 白名单校验，执行 `docker restart -t 10 -- <container>`；仅显式勾选后使用 `sudo -n`，命令失败不自动提权；完成后巡检刷新 | `P5_DOCKER` 重启按钮 |
 | **Docker Exec 终端** | `WS /ws/terminal/{host_alias}`，auth 中的 `docker_container` / `sudo` | 在远端 SSH PTY 直接运行固定的 `docker exec -it -- <container> /bin/sh`，支持键盘、尺寸同步、重连和退出；未运行的容器禁用入口 | `P5_DOCKER` 页内专用终端 |
-| **Docker 容器物理删除** | `DELETE /api/v1/ssh/docker/{host_alias}/containers/{container}` | 带容器名正则白名单校验，调用 `docker rm [-f] [-v]` 真实删除 | `P5_DOCKER` 容器删除按钮 |
+| **Docker 容器物理删除** | `DELETE /api/v1/ssh/docker/{host_alias}/containers/{container}` | 带容器名正则白名单校验，调用 `docker rm [-f] [-v]` 真实删除；当前路由没有 `sudo` 参数，普通命令失败后后端会自动尝试 `sudo -n`，与项目“只由用户显式勾选 sudo”的约束不一致 | `P5_DOCKER` 容器删除按钮 |
 | **Systemd 服务名称、描述和状态** | `GET /api/v1/ssh/inspect/{host_alias}` | `systemctl list-units` 提取前 35 项；`enabled` 由加载状态推断，内存、工作目录、启动命令、重启策略和日志为占位或空值 | `P6_SYSTEMD` 服务列表 |
 | **当前用户 Crontab 表达式和命令** | `GET /api/v1/ssh/inspect/{host_alias}` | `crontab -l` 提取非注释行；标题、用户、上次执行时间/结果、下次运行时间等为固定/占位值，未采集 systemd timers | `P7_CRON` 任务清单 |
 | **部分防火墙规则** | `GET /api/v1/ssh/inspect/{host_alias}` | 解析 `ufw` / `firewall-cmd` / `iptables`；来源 CIDR、备注等多处填固定值，页面“监听端口是否放行”未做真实规则比对 | `P8_FIREWALL` 规则清单 |
@@ -159,8 +151,8 @@
   - 用户新保存的常用命令仅存在前端响应式变量中，**刷新浏览器即刻丢失，后端无数据库持久化支持**；
   - `runLlmSemanticPolish`（AI 语义润色）：前端针对 `kubectl`、`docker`、`find` 写的硬编码标题替换。
 - **与后端的联调缺口**：
-  - 后端提供读取远端 shell 历史文件的采集端点；
-  - 后端 SQLite 提供常用命令模板的持久化存储与标签分类 CRUD 接口。
+  - 尚无读取远端 shell 历史文件的后端采集端点；
+  - 尚无后端 SQLite 常用命令模板持久化存储与标签分类 CRUD 接口。
 
 ---
 
@@ -176,20 +168,17 @@
 
 ### 3.4 Docker 容器管理 (`P5_DOCKER`)
 
-- **当前状态**：🟡 **列表、运行参数、启动、停止、删除、重启和 Exec 已接线；docker run 命令窗口已移除**
+- **当前状态**：✅ **模块已完成；列表、运行参数、启动、停止、删除、重启和 Exec 已接线，docker run 命令窗口已移除**
 - **代码位置**：`src/views/DockerStudioView.vue`、`src/stores/workbenchStore.ts`、`src/components/terminal/RealXtermTerminal.vue`、`backend/main.py`、`backend/metrics_collector.py`
 - **已实装**：
   - **启动/停止容器**：`exited` / `created` 显示启动，`running` / `restarting` 显示停止；`paused` / `removing` / `dead` / `unknown` 禁用启停。停止需确认，执行真实 API，成功后重新巡检，不在前端伪造运行状态；启停/重启期间锁定同一容器的相关按钮，失败或超时按真实结果提示。
   - **重启容器**：确认后请求真实重启 API，按主机与容器 ID 标记进行中并防止重复点击；根据后端命令退出码反馈结果，成功后巡检刷新列表。连接失败/超时不会伪报成功，需刷新确认最终状态。
   - **Exec 终端**：在 Docker 页顶部打开独立 xterm，点击入口后自动滚到顶部使终端可见；通过 auth 帧传递固定主机与容器 ID，在远端 PTY 直接进入容器 `/bin/sh`。支持输入、输出、resize、重连；关闭面板、离开页面或切换主机均断开会话；容器内 `exit` 结束会话，不会退回宿主机 shell。
-  - **权限与认证**：启停/重启/Exec 的 sudo 默认关闭，仅用户勾选才使用 `sudo -n`，不会自动回退提权；SSH 临时密码沿用后端内存凭据。镜像需包含 `/bin/sh`，无 shell 的镜像会显示 Docker 错误并结束会话。
+  - **权限与认证**：启停/重启/Exec 的 sudo 默认关闭，仅用户勾选才使用 `sudo -n`，不会自动回退提权；删除接口是例外：没有用户 sudo 选项，后端会在 `docker rm` 失败后自动尝试 `sudo -n`。SSH 临时密码沿用后端内存凭据。镜像需包含 `/bin/sh`，无 shell 的镜像会显示 Docker 错误并结束会话。
   - **参数查看**：网络模式（含 host/bridge/none/自定义网络）、重启策略和健康状态显示在摘要；“查看参数”按容器展开运行时间、退出码/OOM、重启重试/计数、CPU/内存限制/绑核、运行用户/特权/只读根文件系统、网络 IPv4/IPv6 与 Compose 项目/服务。挂载显示只读/读写，兼容 tmpfs。详情采集失败保留基础容器列表，显示未读取，不把未知当作默认值。
-  - **采集边界**：仍使用现有 inspect API，一次 `docker ps` 后批量 inspect 最多 25 个容器，只投影必要参数，不采集 Env、启动命令或任意标签；未增加提权。已发布端口保留绑定 IP 与 TCP/UDP/SCTP，停止容器可回退读取配置绑定；仅暴露的端口标注“未发布”，不提供宿主机防火墙跳转；host 模式明确提示共享宿主机网络。
+  - **采集边界**：仍使用现有 inspect API，一次 `docker ps` 后批量 inspect 最多 25 个容器，只投影必要参数，不采集 Env、启动命令或任意标签；未增加提权。已发布端口保留绑定 IP 与 TCP/UDP/SCTP，停止容器可回退读取配置绑定；仅暴露的端口标注“未发布”，host 模式明确提示共享宿主机网络。
   - **列表来源与隔离**：移除 Docker 初始演示数组；切换主机清空列表并巡检，接受成功空列表，支持加载/错误/重试；与计划任务共用主机和请求序号校验，阻止旧响应覆盖。启停/重启/Exec 使用列表中的容器 ID；保留 Docker 实际返回的 running/exited/created/paused/restarting/removing/dead 状态，无法识别时为 unknown。
-- **仍为假数据或未接线**：
-  - 尚未采集容器实时 CPU/内存占用与端口防火墙放行状态；对应字段返回 `null`，不再展示固定占位值或绿色放行徽章。资源限制来自真实配置，不代表实时占用。
-  - 列表巡检仍不带 sudo；读取依赖 SSH 用户本身的 Docker 权限。后端采集器可能把缺少 Docker、权限不足或采集命令失败转成空列表，页面文案为“未返回容器”，不据此断言主机没有容器。
-- **与后端的联调缺口**：实时容器资源统计及采集失败的细分状态。
+- **边界说明**：列表巡检依赖 SSH 用户本身的 Docker 权限，不主动提权；缺少 Docker、权限不足或采集命令失败时显示读取失败或空列表，不据此断言主机没有容器。删除接口沿用当前路由行为，操作前需确认。
 
 ---
 
@@ -201,8 +190,8 @@
   - **启停/重载服务**：点击“启动 / 停止 / 重启”，调用 `executeTerminalCommand` 记录本地命令，并直接在前端强行修改 `svc.state = 'running'`，**远端服务没有任何变化**；
   - **新建服务向导**：表单生成的 unit 内容仅在前端内存数组 `store.systemdServices.unshift`，未在远端 `/etc/systemd/system/` 真实写入文件，也未执行 `daemon-reload`。
 - **与后端的联调缺口**：
-  - 后端提供服务管控端点 `/api/v1/ssh/systemd/{host_alias}/services/{service}/action`（start/stop/restart/reload/enable/disable）；
-  - 新建服务复用已实装的 `PUT /api/v1/ssh/files/{host_alias}/content` 写入 unit 文件并触发 `daemon-reload`。
+  - 尚无服务管控端点 `/api/v1/ssh/systemd/{host_alias}/services/{service}/action`（start/stop/restart/reload/enable/disable）；
+  - 新建服务需要复用已实装的 `PUT /api/v1/ssh/files/{host_alias}/content` 写入 unit 文件，并另行触发 `daemon-reload`。
 
 ---
 
@@ -217,7 +206,7 @@
   - **启用/禁用任务**：仅在前端将 `task.enabled` 置反并弹 Toast，**未修改远端 crontab 配置**；
   - **新增计划任务**：仅向前端数组 `store.cronTasks` 添加一条记录，生成的 `(crontab -l; echo ...) | crontab -` 未实际执行。
 - **与后端的联调缺口**：
-  - 后端提供 Crontab 操作端点：支持写入、注释、删除特定 crontab 行，或单次异步运行任务命令。
+  - 尚无 Crontab 操作端点；后续需要提供写入、注释、删除特定 crontab 行，以及单次异步运行任务命令的接口。
 
 ---
 
@@ -229,7 +218,7 @@
   - **应用新增规则**：点击“立即应用该规则”，前端在内存中 `store.firewallRules.unshift`，并将对应端口的 `firewallAllowed` 置为 true，但生成的 `sudo ufw allow ...` 或 `firewall-cmd ...` **并未发给远端执行，实际放行状态未知**。
   - “监听端口与规则对照”使用进程的 `firewallAllowed` 字段；进程采集现返回 `null`（未知），尚未完成真实防火墙规则匹配。
 - **与后端的联调缺口**：
-  - 后端根据探测到的防火墙类型（ufw / firewalld / iptables），提供统一的规则添加/删除端点 `/api/v1/ssh/firewall/{host_alias}/rules`。
+  - 尚无根据探测到的防火墙类型（ufw / firewalld / iptables）统一添加/删除规则的后端端点 `/api/v1/ssh/firewall/{host_alias}/rules`。
 
 ---
 
@@ -240,9 +229,9 @@
 | `P0_HOSTS` 主机池 | SSH 配置读/写/删、探测、临时密码、连接统计 | 新增请求失败仍可能显示本地新主机；连接统计请求失败会本地累加 |
 | `P1_WORKBENCH` 工作台 | xterm 的键盘输入、输出和窗口尺寸经 WS 连接 SSH PTY；同主机双栏可建立两条连接 | AI 生成为关键词规则；离开页面会关闭终端连接，多主机 Tab 只是前端标签 |
 | `P2_METRICS_PROCESS` 性能/进程 | CPU、内存、Swap、磁盘和网络指标；真实进程列表与 SIGTERM/SIGKILL、确认与显式 sudo、刷新与过期响应隔离 | 内存应用/PageCache 比例固定为 80/20；端口放行状态未知；归属尚未解析 |
-| `P3_FILES` 文件管理 | 目录、体积、文件内容及大部分增删改传操作都有 API | 初始文件样例和读取失败时的编辑器缓存/生成文本；编辑器保存后“重启服务”按钮只模拟重启；部分 sudo 自动开启 |
+| `P3_FILES` 文件管理 | 目录、体积、文件内容及大部分增删改传操作都有 API | 初始文件样例和读取失败时的编辑器缓存/生成文本；编辑器保存后“重启服务”按钮只模拟重启；前端路径预选及后端多个操作的 sudo 自动回退均违反显式授权约束 |
 | `P4_COMMANDS` 命令库 | 本地正则聚类与参数化模板 UI 可运行，无后端数据源 | 初始 22 条历史样本、4 条模板；LLM 语义润色是假；模板不持久化，执行入口只记录本地命令历史 |
-| `P5_DOCKER` 容器 | 容器列表、网络模式/端口与挂载、重启策略/健康/资源限制等展开参数；真实启停/重启/删除和 Exec PTY；列表切换隔离与错误重试 | 实时 CPU/内存占用及防火墙放行状态未采集；已移除 docker run 部署窗口；无 shell 镜像不支持 Exec |
+| `P5_DOCKER` 容器 | 容器列表、网络模式/端口与挂载、重启策略/健康/资源限制等展开参数；真实启停/重启/删除和 Exec PTY；列表切换隔离与错误重试；已移除 docker run 部署窗口 | 无 shell 镜像不支持 Exec；列表读取依赖 SSH 用户的 Docker 权限 |
 | `P6_SYSTEMD` 服务 | 非空巡检时服务名称、描述、状态 | 服务详情多个字段为占位；启停/重启/新建是假操作 |
 | `P7_CRON` 计划任务 | 切换主机立即巡检当前用户 crontab，支持空列表、错误重试及过期回包拦截 | 上次/下次执行信息为占位；新增、启禁用、试运行是假操作；systemd timer 未采集 |
 | `P8_FIREWALL` 防火墙 | 防火墙类型/状态及部分规则采集 | 来源/备注有占位；监听端口放行未真实比对；添加规则是假操作 |
@@ -254,7 +243,7 @@
 
 ---
 
-## 五、 最近调整的验证记录（2026-11-11）
+## 五、 最近调整的验证记录（2026-11-11 至 2026-11-12）
 
 | 检查项 | 结果与范围 |
 | :--- | :--- |

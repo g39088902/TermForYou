@@ -45,7 +45,6 @@ class DockerPortInfo(BaseModel):
     hostIp: str = ""
     containerPort: int
     protocol: Literal["tcp", "udp", "sctp"] = "tcp"
-    firewallAllowed: Optional[bool] = None
 
 class DockerMountInfo(BaseModel):
     hostPath: str
@@ -63,8 +62,6 @@ class DockerContainerInfo(BaseModel):
     name: str
     image: str
     status: str
-    cpuPercent: Optional[float] = None
-    memMb: Optional[float] = None
     ports: List[DockerPortInfo] = Field(default_factory=list)
     volumes: List[DockerMountInfo] = Field(default_factory=list)
     diskUsage: Optional[str] = None

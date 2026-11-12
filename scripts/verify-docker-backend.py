@@ -66,8 +66,9 @@ class DockerInspectionChecks(unittest.TestCase):
         self.assertEqual(len(c["ports"]), 5)
         self.assertEqual({p["hostIp"] for p in c["ports"] if p["hostPort"]}, {"127.0.0.1", "::1"})
         self.assertTrue(all(p["hostPort"] == 0 for p in c["ports"] if p["containerPort"] != 80))
-        self.assertTrue(all(p["firewallAllowed"] is None for p in c["ports"]))
-        self.assertIsNone(c["cpuPercent"], "Never report placeholder utilization")
+        self.assertTrue(all("firewallAllowed" not in p for p in c["ports"]))
+        self.assertNotIn("cpuPercent", c)
+        self.assertNotIn("memMb", c)
 
     def test_host_none_quota_and_no_healthcheck(self):
         for mode in ["host", "none", "container:abc"]:
