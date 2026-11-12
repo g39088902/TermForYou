@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import type { ProcessItem, ProcessSignal } from '@/types'
 import {
   store,
   currentHost,
   navigateWithContext,
-  executeTerminalCommand,
-  showToast
+  signalProcess,
+  refreshProcesses
 } from '@/stores/workbenchStore'
 import {
   Activity,
@@ -18,6 +19,7 @@ import {
   Cog,
   Container,
   Skull,
+  RefreshCw,
   ArrowUp,
   ArrowDown,
   HardDriveDownload,
@@ -53,9 +55,27 @@ const filteredProcesses = computed(() => {
   })
 })
 
-function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
-  executeTerminalCommand(`sudo kill -s ${signal} ${pid} # (${name})`)
-  showToast(`已向进程 ${name} (PID ${pid}) 发送 ${signal} 信号`)
+const processSudo = ref(false)
+watch(() => store.activeHostId, () => { processSudo.value = false })
+let refreshTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  void refreshProcesses()
+  refreshTimer = setInterval(() => {
+    if (!document.hidden && !store.processesLoading && !Object.keys(store.processActions).length) void refreshProcesses()
+  }, 5000)
+})
+onUnmounted(() => { if (refreshTimer) clearInterval(refreshTimer) })
+
+function operationDisabled(proc: ProcessItem) {
+  return !proc.identity || proc.pid <= 1 || proc.state === 'Z' || !!store.processActions[`${store.activeHostId}/${proc.pid}`]
+}
+
+async function sendSignal(proc: ProcessItem, signal: ProcessSignal) {
+  if (operationDisabled(proc)) return
+  const hostId = store.activeHostId
+  const label = signal === 'SIGKILL' ? '强制终止' : '请求停止'
+  if (!window.confirm(`确认在服务器「${currentHost.value.name}」${label} ${proc.name} (PID ${proc.pid})？\n${signal === 'SIGKILL' ? '强杀可能造成未保存的数据丢失。' : '将发送 SIGTERM；进程可自行处理或忽略该信号。'}托管服务可能自动重启。${processSudo.value ? '\n本次操作使用 sudo。' : ''}`)) return
+  await signalProcess(proc, signal, processSudo.value, hostId)
 }
 </script>
 
@@ -152,7 +172,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
         </div>
 
         <div class="text-[11px] text-slate-400 pt-2 border-t border-slate-800/80 flex items-center justify-between">
-          <span>支持点击下方进程表按 RSS 内存排序</span>
+          <span>进程 CPU 为自启动以来的平均占用；RSS 为当前驻留内存</span>
         </div>
       </div>
 
@@ -295,11 +315,17 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
             交互式进程监控与端口反查表 (支持一键跳转防火墙 / 文件目录 / Systemd / 容器)
           </h2>
           <p class="text-xs text-slate-400 mt-0.5">
-            点击表格中的「端口放行状态」、「CWD 路径」或「所属服务/容器」胶囊按钮即可跨页面带上下文直达。
+            按 CPU 平均占用展示前 100 项，每 5 秒刷新；信号发送成功不代表进程已退出。
           </p>
         </div>
 
-        <div class="flex items-center gap-3">
+        <div class="flex flex-wrap items-center gap-3">
+          <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+            <input v-model="processSudo" type="checkbox" class="rounded" /> 使用 sudo
+          </label>
+          <button type="button" :disabled="store.processesLoading || !store.activeHostId" @click="refreshProcesses()" class="inline-flex items-center gap-1 px-2 py-1 rounded bg-slate-800 text-slate-200 text-xs disabled:opacity-50">
+            <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': store.processesLoading }" /> 刷新
+          </button>
           <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
             <input v-model="onlyListeningPorts" type="checkbox" class="rounded" />
             <span>仅看含监听端口进程 (ss -tulnp)</span>
@@ -317,6 +343,9 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
         </div>
       </div>
 
+      <p v-if="store.processesError" role="alert" class="px-4 py-3 text-xs text-rose-700 dark:text-rose-300 bg-rose-500/15">{{ store.processesError }}</p>
+      <p v-else-if="store.processesLoading && !store.processes.length" role="status" class="px-4 py-3 text-xs text-slate-400">正在读取进程列表…</p>
+      <p v-else-if="!filteredProcesses.length" role="status" class="px-4 py-3 text-xs text-slate-400">{{ store.processes.length ? '没有匹配的进程' : '当前没有可显示的进程' }}</p>
       <div tabindex="0" role="region" aria-labelledby="process-table-heading" class="table-wrapper">
         <table class="text-left text-xs" style="--label-2: 'CPU/内存'; --label-3: '监听端口与防火墙'; --label-4: '跨模块直达'">
           <thead class="bg-slate-950 text-slate-400 text-[11px] border-b border-slate-800">
@@ -325,7 +354,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
               <th class="py-2.5 px-3">CPU% / 内存 (RSS)</th>
               <th class="py-2.5 px-3">监听端口 & 防火墙联动</th>
               <th class="py-2.5 px-3">工作目录 (CWD) & 托管归属</th>
-              <th class="py-2.5 px-3 text-right">信号管控</th>
+              <th class="py-2.5 px-3 text-right whitespace-nowrap">信号管控</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-800/70">
@@ -344,6 +373,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
                     PID {{ proc.pid }}
                   </span>
                   <span class="font-bold">{{ proc.name }}</span>
+                  <span class="text-slate-400 text-[11px]" :title="`进程状态 ${proc.state}；已运行 ${proc.uptime}`">{{ proc.state }}</span>
                   <span class="text-[11px] text-slate-400">({{ proc.user }})</span>
                 </div>
                 <div class="font-mono text-[11px] text-slate-400 mt-1 truncate max-w-md" :title="proc.cmdline">
@@ -369,7 +399,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
                   </span>
 
                   <button
-                    v-if="!proc.firewallAllowed"
+                    v-if="proc.firewallAllowed === false"
                     type="button"
                     @click="
                       navigateWithContext({
@@ -389,7 +419,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
                   </button>
 
                   <button
-                    v-else
+                    v-else-if="proc.firewallAllowed === true"
                     type="button"
                     @click="
                       navigateWithContext({
@@ -404,6 +434,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
                     <ShieldCheck class="w-3 h-3" />
                     <span>防火墙已放行</span>
                   </button>
+                  <span v-if="proc.firewallAllowed == null" class="text-slate-400 text-[11px]">放行状态未知</span>
                 </div>
                 <span v-else class="text-slate-500 text-[11px]">无网络监听</span>
               </td>
@@ -412,6 +443,7 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
               <td class="py-2.5 px-3">
                 <div class="flex items-center gap-1.5 flex-wrap">
                   <button
+                    v-if="proc.cwd"
                     type="button"
                     @click="
                       navigateWithContext({
@@ -464,22 +496,26 @@ function sendSignal(pid: number, name: string, signal: 'SIGTERM' | 'SIGKILL') {
               </td>
 
               <!-- 信号发送 -->
-              <td class="py-2.5 px-3 text-right">
+              <td class="py-2.5 px-3 text-right whitespace-nowrap">
                 <div class="inline-flex items-center gap-1.5">
                   <button
                     type="button"
-                    @click="sendSignal(proc.pid, proc.name, 'SIGTERM')"
-                    class="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] cursor-pointer"
+                    :disabled="operationDisabled(proc)"
+                    :aria-label="`向 ${proc.name} PID ${proc.pid} 发送 SIGTERM`"
+                    @click="sendSignal(proc, 'SIGTERM')"
+                    class="disabled:opacity-40 disabled:cursor-not-allowed px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] cursor-pointer"
                   >
-                    优雅停止 (15)
+                    {{ store.processActions[`${store.activeHostId}/${proc.pid}`] === 'SIGTERM' ? '发送中…' : '优雅停止 (15)' }}
                   </button>
                   <button
                     type="button"
-                    @click="sendSignal(proc.pid, proc.name, 'SIGKILL')"
-                    class="flex items-center gap-1 px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-[11px] cursor-pointer"
+                    :disabled="operationDisabled(proc)"
+                    :aria-label="`向 ${proc.name} PID ${proc.pid} 发送 SIGKILL`"
+                    @click="sendSignal(proc, 'SIGKILL')"
+                    class="disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/30 text-rose-700 dark:text-rose-300 border border-rose-500/30 text-[11px] cursor-pointer"
                   >
                     <Skull class="w-3 h-3" />
-                    <span>强杀 (9)</span>
+                    <span>{{ store.processActions[`${store.activeHostId}/${proc.pid}`] === 'SIGKILL' ? '发送中…' : '强杀 (9)' }}</span>
                   </button>
                 </div>
               </td>

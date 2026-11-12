@@ -28,11 +28,66 @@ class TerminalAuthPayload(BaseModel):
     docker_container: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     sudo: bool = False
 
+class ProcessSignalPayload(BaseModel):
+    pid: int = Field(strict=True, ge=2, le=2147483647)
+    signal: Literal["SIGTERM", "SIGKILL"]
+    identity: str = Field(pattern=r"^[a-f0-9-]{36}:[0-9]+$")
+    sudo: bool = Field(default=False, strict=True)
+
 class DockerRestartPayload(BaseModel):
     sudo: bool = False
 
 class DockerActionPayload(DockerRestartPayload):
     action: Literal["start", "stop"]
+
+class DockerPortInfo(BaseModel):
+    hostPort: int = 0  # 0 means exposed in the container but not published on the host
+    hostIp: str = ""
+    containerPort: int
+    protocol: Literal["tcp", "udp", "sctp"] = "tcp"
+    firewallAllowed: Optional[bool] = None
+
+class DockerMountInfo(BaseModel):
+    hostPath: str
+    containerPath: str
+    type: str
+    readOnly: bool
+
+class DockerNetworkInfo(BaseModel):
+    name: str
+    ipAddress: str = ""
+    ipv6Address: str = ""
+
+class DockerContainerInfo(BaseModel):
+    id: str
+    name: str
+    image: str
+    status: str
+    cpuPercent: Optional[float] = None
+    memMb: Optional[float] = None
+    ports: List[DockerPortInfo] = Field(default_factory=list)
+    volumes: List[DockerMountInfo] = Field(default_factory=list)
+    diskUsage: Optional[str] = None
+    createdAt: str
+    detailsAvailable: bool = False
+    networkMode: Optional[str] = None
+    networks: List[DockerNetworkInfo] = Field(default_factory=list)
+    restartPolicy: Optional[str] = None
+    restartMaxRetries: Optional[int] = None
+    restartCount: Optional[int] = None
+    healthStatus: Optional[str] = None
+    startedAt: Optional[str] = None
+    finishedAt: Optional[str] = None
+    exitCode: Optional[int] = None
+    oomKilled: Optional[bool] = None
+    memoryLimitBytes: Optional[int] = None
+    cpuLimit: Optional[float] = None
+    cpusetCpus: Optional[str] = None
+    privileged: Optional[bool] = None
+    readOnlyRootfs: Optional[bool] = None
+    runUser: Optional[str] = None
+    composeProject: Optional[str] = None
+    composeService: Optional[str] = None
 
 class SetCredentialPayload(BaseModel):
     password: str

@@ -12,6 +12,7 @@
 | 公共随行终端、独立日志窗 | 已删除组件/窗口、顶部与 Mini HUD 入口、快捷键、关联状态和模拟输出；命令面板中的“在随行终端执行”入口也已移除。 |
 | 计划任务切换服务器 | 切换立即清空旧任务并发起巡检，显示加载状态；接受真实空列表，读取失败支持重试，拦截过期响应。详见 2.6。 |
 | Docker 启动 / 停止 / 重启 / Exec | 启停与重启接入真实 SSH 命令并刷新列表，同容器操作互斥，停止/重启需确认；Exec 在 Docker 页内通过 WebSocket PTY 打开容器 `/bin/sh`，点击后自动滚到顶部终端。sudo 默认关闭，需显式勾选。 |
+| Docker 运行参数 | 网络模式、重启策略与健康状态常显；逐容器展开网络/IP、资源限制、运行记录、隔离权限和 Compose 归属。批量采集真实参数；挂载区显示 RO/RW 与 tmpfs，区分已发布和仅暴露端口；移除伪造资源占用和防火墙放行标记。 |
 | 命令记录 | `executeTerminalCommand` 已移除伪造输出、退出码和耗时逻辑；仍只记录本地命令历史、处理部分导航，不向 SSH 发送命令。 |
 
 ## 一、 判定口径与现状
@@ -19,10 +20,10 @@
 | 分类 | 判定口径 | 主要模块 |
 | :--- | :--- | :--- |
 | **已接线** | 前端发起 REST/WS 请求，后端读写本机配置或经 SSH 访问目标主机；仍需目标机验收 | 主机池、真实 xterm、轻量指标、远程文件管理、Docker 启动/停止/删除/重启/Exec |
-| **只读接线，写操作模拟** | `inspect` 返回部分真实列表，但管理按钮只改前端内存或调用模拟命令函数 | 进程、Systemd、Cron、防火墙、Docker 部署向导 |
+| **只读接线，写操作模拟** | `inspect` 返回部分真实列表，但管理按钮只改前端内存或调用模拟命令函数 | Systemd、Cron、防火墙 |
 | **纯前端/假数据** | 无对应后端数据源，或展示固定样例、伪造执行结果 | AI 生成、命令历史/模板 |
 
-**仍存在的列表限制**：`src/stores/workbenchStore.ts` 预置进程、文件、服务和防火墙演示数组。`inspectHost` 仅在后端返回**非空数组**时覆盖它们；采集为空、失败或切换主机时可能继续展示样例或上一台主机的数据。计划任务和 Docker 的清空与过期响应处理未推广到这些列表，不能只凭页面出现列表就判断数据来自当前主机。
+**仍存在的列表限制**：`src/stores/workbenchStore.ts` 预置文件、服务和防火墙演示数组。`inspectHost` 仅在后端返回**非空数组**时覆盖它们；采集为空、失败或切换主机时可能继续展示样例或上一台主机的数据。进程、计划任务和 Docker 已支持清空与过期响应隔离，其余列表尚未推广，不能只凭页面出现列表就判断数据来自当前主机。
 
 **计划任务、Docker 与文件列表**：计划任务和 Docker 已移除初始演示数据，切换主机立即清空并发起巡检，成功时接受空列表，失败时显示读取失败；旧请求不会覆盖当前任务。文件管理器主动调用 `files/.../list` 成功后会用真实结果（包括空列表）覆盖文件样例。
 
@@ -101,8 +102,9 @@
 
 | 只读数据项 | 数据获取接口 | 远端真实采集机制 | 对应页面展示 |
 | :--- | :--- | :--- | :--- |
-| **进程列表与端口映射** | `GET /api/v1/ssh/inspect/{host_alias}` | `ps` + `ss` 关联 PID；采集限前 35 个进程，每个 PID 仅保留一个监听端口；`firewallAllowed` 对监听端口直接设为 `true`，并非规则比对 | `P2_METRICS_PROCESS` 进程表格 |
-| **Docker 容器列表与挂载卷** | `GET /api/v1/ssh/inspect/{host_alias}` | `docker ps -a` + `docker inspect` 提供容器、映射端口和挂载；CPU%/内存 MB 固定填 `0.8/128`（运行中）或 `0/0`，端口 `firewallAllowed` 固定为 `true`，不是实测 | `P5_DOCKER` 容器管理列表 |
+| **进程列表与端口映射** | `GET /api/v1/ssh/processes/{host_alias}`，亦包含在 `inspect` | `/proc` 采集进程及启动标识，兼容无完整 `ps` 的主机；`ss` 可选，缺失时仅降级监听信息。按自启动以来平均 CPU 排序前 100 项，每个 PID 保留一个监听端口；防火墙状态为未知，CWD 读取不到不伪造路径 | `P2_METRICS_PROCESS` 真实进程表格，5 秒刷新和手动刷新 |
+| **进程停止/强杀** | `POST /api/v1/ssh/processes/{host_alias}/kill` | 仅 SIGTERM/SIGKILL；PID、启动标识校验，确认后执行；sudo 默认关闭，失败不自动提权，操作后重新读取真实状态 | `P2_METRICS_PROCESS` 信号管控 |
+| **Docker 容器列表与挂载卷** | `GET /api/v1/ssh/inspect/{host_alias}` | `docker ps -a` + 单次批量 `docker inspect`（最多 25 个容器）提供容器、端口、挂载及运行参数；CPU%/内存占用和防火墙放行状态返回 `null`，页面展示真实资源限制与中性端口入口 | `P5_DOCKER` 容器管理列表 |
 | **Docker 容器启动/停止** | `POST /api/v1/ssh/docker/{host_alias}/containers/{container}/action`，JSON `{action: "start" 或 "stop", sudo: false}` | 校验操作与容器名称/ID；执行 `docker start -- <container>` 或 `docker stop -t 10 -- <container>`，返回真实退出码；停止前确认，成功后巡检刷新，同容器生命周期操作互斥 | `P5_DOCKER` 每行启动/停止按钮 |
 | **Docker 容器重启** | `POST /api/v1/ssh/docker/{host_alias}/containers/{container}/restart` | 名称/ID 白名单校验，执行 `docker restart -t 10 -- <container>`；仅显式勾选后使用 `sudo -n`，命令失败不自动提权；完成后巡检刷新 | `P5_DOCKER` 重启按钮 |
 | **Docker Exec 终端** | `WS /ws/terminal/{host_alias}`，auth 中的 `docker_container` / `sudo` | 在远端 SSH PTY 直接运行固定的 `docker exec -it -- <container> /bin/sh`，支持键盘、尺寸同步、重连和退出；未运行的容器禁用入口 | `P5_DOCKER` 页内专用终端 |
@@ -163,31 +165,31 @@
 ---
 
 ### 3.3 进程管理操作 (`P2_METRICS_PROCESS`)
-- **当前状态**：🟡 **列表数据已实装，操作为假执行**
-- **代码位置**：`src/views/MetricsProcessView.vue` (`sendSignal`)
-- **假数据机制**：
-  - Store 预置 4 条演示进程（`nginx`, `api-core`, `redis-server`, `node-exporter`）；巡检返回非空进程数组时才替换；
-  - 点击“终止进程”发送 `SIGTERM` 或 `SIGKILL` 时，调用 `executeTerminalCommand("sudo kill -s ...")`，**只在前端模拟记录，未在远端真实杀死进程**。
-- **与后端的联调缺口**：
-  - 需要后端新增 `/api/v1/ssh/processes/{host_alias}/kill`（带 PID 校验与 sudo 支持），或者通过终端 WebSocket 通道注入命令。
+- **当前状态**：✅ **列表与 SIGTERM / SIGKILL 已接通前后端**
+- **代码位置**：`src/views/MetricsProcessView.vue`、`src/stores/workbenchStore.ts`、`backend/main.py`、`backend/process_manager.py`、`backend/metrics_collector.py`。
+- **执行链路**：确认对话框 → `POST /api/v1/ssh/processes/{host_alias}/kill`（`pid`、`signal`、`identity`、`sudo`）→ SSH 运行标准库 Python 脚本真实发送信号；结果返回后重新读取进程列表，不凭成功回包删除行，不将“发送信号成功”误报为“进程已退出”。
+- **权限与保护**：只允许正整数 PID ≥ 2 和 SIGTERM/SIGKILL；核对 boot ID 与 `/proc/PID/stat` 启动时刻，标识变化拒绝操作；支持时使用 pidfd 绑定进程，旧 Python/内核降级为身份校验后 `os.kill`（仍存在检查与发送间极短的 PID 复用竞态）。拒绝僵尸进程、PID 1 和本次 SSH 操作的祖先进程；默认不提权，显式勾选才使用 `sudo -n -- python3`，不保存提权密码。
+- **数据与刷新**：移除演示进程，空列表直接生效；切换服务器立即清空并隔离旧回包，进程专用查询与全量巡检共享采集代码、遵循请求时序；同 PID 操作互斥。错误、认证失败或网络异常均显示真实失败/未确认结果，操作后刷新；页面可见时每 5 秒自动刷新，可手动重试。
+- **采集边界**：最多展示平均 CPU 占用前 100 项，CPU 为进程自启动以来平均值；一个 PID 仅保留一个监听端口，尚未实现服务/容器归属解析和真实防火墙匹配。SIGTERM 可能被忽略，托管进程可能自动重启。
 
 ---
 
-### 3.4 Docker 容器管理与部署 (`P5_DOCKER`)
+### 3.4 Docker 容器管理 (`P5_DOCKER`)
 
-- **当前状态**：🟡 **列表、启动、停止、删除、重启和 Exec 已接线；部署向导仍为假执行**
+- **当前状态**：🟡 **列表、运行参数、启动、停止、删除、重启和 Exec 已接线；docker run 命令窗口已移除**
 - **代码位置**：`src/views/DockerStudioView.vue`、`src/stores/workbenchStore.ts`、`src/components/terminal/RealXtermTerminal.vue`、`backend/main.py`、`backend/metrics_collector.py`
 - **已实装**：
   - **启动/停止容器**：`exited` / `created` 显示启动，`running` / `restarting` 显示停止；`paused` / `removing` / `dead` / `unknown` 禁用启停。停止需确认，执行真实 API，成功后重新巡检，不在前端伪造运行状态；启停/重启期间锁定同一容器的相关按钮，失败或超时按真实结果提示。
   - **重启容器**：确认后请求真实重启 API，按主机与容器 ID 标记进行中并防止重复点击；根据后端命令退出码反馈结果，成功后巡检刷新列表。连接失败/超时不会伪报成功，需刷新确认最终状态。
   - **Exec 终端**：在 Docker 页顶部打开独立 xterm，点击入口后自动滚到顶部使终端可见；通过 auth 帧传递固定主机与容器 ID，在远端 PTY 直接进入容器 `/bin/sh`。支持输入、输出、resize、重连；关闭面板、离开页面或切换主机均断开会话；容器内 `exit` 结束会话，不会退回宿主机 shell。
   - **权限与认证**：启停/重启/Exec 的 sudo 默认关闭，仅用户勾选才使用 `sudo -n`，不会自动回退提权；SSH 临时密码沿用后端内存凭据。镜像需包含 `/bin/sh`，无 shell 的镜像会显示 Docker 错误并结束会话。
+  - **参数查看**：网络模式（含 host/bridge/none/自定义网络）、重启策略和健康状态显示在摘要；“查看参数”按容器展开运行时间、退出码/OOM、重启重试/计数、CPU/内存限制/绑核、运行用户/特权/只读根文件系统、网络 IPv4/IPv6 与 Compose 项目/服务。挂载显示只读/读写，兼容 tmpfs。详情采集失败保留基础容器列表，显示未读取，不把未知当作默认值。
+  - **采集边界**：仍使用现有 inspect API，一次 `docker ps` 后批量 inspect 最多 25 个容器，只投影必要参数，不采集 Env、启动命令或任意标签；未增加提权。已发布端口保留绑定 IP 与 TCP/UDP/SCTP，停止容器可回退读取配置绑定；仅暴露的端口标注“未发布”，不提供宿主机防火墙跳转；host 模式明确提示共享宿主机网络。
   - **列表来源与隔离**：移除 Docker 初始演示数组；切换主机清空列表并巡检，接受成功空列表，支持加载/错误/重试；与计划任务共用主机和请求序号校验，阻止旧响应覆盖。启停/重启/Exec 使用列表中的容器 ID；保留 Docker 实际返回的 running/exited/created/paused/restarting/removing/dead 状态，无法识别时为 unknown。
 - **仍为假数据或未接线**：
-  - **docker run 部署向导**：解析与 Compose 预览由前端正则生成；“立即部署执行”仍只将命令存入本地历史，未在远端部署。
-  - CPU/内存和端口防火墙放行状态仍使用固定占位值，不能当作实时资源与安全状态。
+  - 尚未采集容器实时 CPU/内存占用与端口防火墙放行状态；对应字段返回 `null`，不再展示固定占位值或绿色放行徽章。资源限制来自真实配置，不代表实时占用。
   - 列表巡检仍不带 sudo；读取依赖 SSH 用户本身的 Docker 权限。后端采集器可能把缺少 Docker、权限不足或采集命令失败转成空列表，页面文案为“未返回容器”，不据此断言主机没有容器。
-- **与后端的联调缺口**：真实部署、实时容器资源统计及采集失败的细分状态。
+- **与后端的联调缺口**：实时容器资源统计及采集失败的细分状态。
 
 ---
 
@@ -225,7 +227,7 @@
 - **假数据机制**：
   - Store 预置 4 条演示规则；巡检返回非空列表时才替换。远端采集规则的来源 CIDR 和备注等字段也存在占位值；
   - **应用新增规则**：点击“立即应用该规则”，前端在内存中 `store.firewallRules.unshift`，并将对应端口的 `firewallAllowed` 置为 true，但生成的 `sudo ufw allow ...` 或 `firewall-cmd ...` **并未发给远端执行，实际放行状态未知**。
-  - “监听端口与规则对照”直接使用进程的 `firewallAllowed` 字段，而后端对所有已关联监听端口将它设为 `true`；并未完成真实防火墙规则匹配。
+  - “监听端口与规则对照”使用进程的 `firewallAllowed` 字段；进程采集现返回 `null`（未知），尚未完成真实防火墙规则匹配。
 - **与后端的联调缺口**：
   - 后端根据探测到的防火墙类型（ufw / firewalld / iptables），提供统一的规则添加/删除端点 `/api/v1/ssh/firewall/{host_alias}/rules`。
 
@@ -237,10 +239,10 @@
 | :--- | :--- | :--- |
 | `P0_HOSTS` 主机池 | SSH 配置读/写/删、探测、临时密码、连接统计 | 新增请求失败仍可能显示本地新主机；连接统计请求失败会本地累加 |
 | `P1_WORKBENCH` 工作台 | xterm 的键盘输入、输出和窗口尺寸经 WS 连接 SSH PTY；同主机双栏可建立两条连接 | AI 生成为关键词规则；离开页面会关闭终端连接，多主机 Tab 只是前端标签 |
-| `P2_METRICS_PROCESS` 性能/进程 | CPU、内存、Swap、磁盘和网络指标；非空巡检进程列表 | 进程信号按钮假执行；内存应用/PageCache 比例固定为 80/20；端口放行标志未实测 |
+| `P2_METRICS_PROCESS` 性能/进程 | CPU、内存、Swap、磁盘和网络指标；真实进程列表与 SIGTERM/SIGKILL、确认与显式 sudo、刷新与过期响应隔离 | 内存应用/PageCache 比例固定为 80/20；端口放行状态未知；归属尚未解析 |
 | `P3_FILES` 文件管理 | 目录、体积、文件内容及大部分增删改传操作都有 API | 初始文件样例和读取失败时的编辑器缓存/生成文本；编辑器保存后“重启服务”按钮只模拟重启；部分 sudo 自动开启 |
 | `P4_COMMANDS` 命令库 | 本地正则聚类与参数化模板 UI 可运行，无后端数据源 | 初始 22 条历史样本、4 条模板；LLM 语义润色是假；模板不持久化，执行入口只记录本地命令历史 |
-| `P5_DOCKER` 容器 | 容器列表、挂载、映射端口；真实启动/停止，停止/删除/重启前确认；页内容器 Exec PTY 及点击后滚到顶部；列表切换隔离与错误重试 | CPU/内存及防火墙状态为固定占位；部署是假执行；无 shell 镜像不支持 Exec |
+| `P5_DOCKER` 容器 | 容器列表、网络模式/端口与挂载、重启策略/健康/资源限制等展开参数；真实启停/重启/删除和 Exec PTY；列表切换隔离与错误重试 | 实时 CPU/内存占用及防火墙放行状态未采集；已移除 docker run 部署窗口；无 shell 镜像不支持 Exec |
 | `P6_SYSTEMD` 服务 | 非空巡检时服务名称、描述、状态 | 服务详情多个字段为占位；启停/重启/新建是假操作 |
 | `P7_CRON` 计划任务 | 切换主机立即巡检当前用户 crontab，支持空列表、错误重试及过期回包拦截 | 上次/下次执行信息为占位；新增、启禁用、试运行是假操作；systemd timer 未采集 |
 | `P8_FIREWALL` 防火墙 | 防火墙类型/状态及部分规则采集 | 来源/备注有占位；监听端口放行未真实比对；添加规则是假操作 |
@@ -260,12 +262,15 @@
 | 计划任务回归检查 | `node scripts/verify-cron-host-switch.mjs` 通过。使用真实 Store 与模拟延迟响应验证即时刷新、空结果、A→B→A、请求乱序、旧请求晚失败、部分采集/认证/HTTP 失败、重试、后台探测隔离及关闭会话。该脚本不访问远端主机。 |
 | 页面实测 | 本次修复后，`test-env` 显示 1 条任务，`cloud-prod` 显示空列表；切回服务器时先显示当前主机加载状态。已检查计划任务页面的深浅主题。 |
 | 后端冒烟 | `GET /api/v1/ssh/hosts` 返回 4 台；`POST /api/v1/ssh/probe-all` 返回 `status: ok`，含 4 项探测结果及 4 项指标响应。 |
-| Docker 后端检查 | `backend/.venv/bin/python scripts/verify-docker-backend.py` 通过 8 项检查，覆盖启停请求模型、命令拼接、非法操作/容器参数拒绝、退出码/失败/超时、认证失败及仅显式 sudo。 |
+| Docker 后端检查 | `backend/.venv/bin/python scripts/verify-docker-backend.py` 通过 13 项检查，覆盖批量巡检参数解析、host/none/共享网络、健康检查缺失、CPU 配额、详情失败降级、未发布/IPv6/停止容器端口和 tmpfs，及启停请求模型、命令拼接、非法操作/容器参数拒绝、退出码/失败/超时、认证失败及仅显式 sudo。 |
+| Docker 参数实机验证 | `test-env` 现有容器正确返回 host/bridge 与不同重启策略；隔离临时容器经真实 inspect API 验证 none 网络、on-failure:3、0.25 核/32 MiB 限制、只读根文件系统、运行用户、健康检查、tmpfs、Compose 归属与未发布端口。临时容器及匿名卷已清理。 |
+| Docker 参数界面验证 | 在 1440×900 深浅主题下检查摘要与展开详情，验证 Enter 展开/收起和 bridge 网络实际 IPv4；800px 窄窗口按内容宽度改为单列参数，长镜像名与挂载路径不挤压操作按钮。浏览器未记录错误。 |
 | Docker 前端回归 | `node scripts/verify-docker-store.mjs` 通过，验证启停/重启请求与显式 sudo、同容器操作冲突拦截、失败不伪造状态、异常后解锁、切换服务器后的回包隔离和空列表。原有计划任务回归脚本也通过。 |
 | Docker 实机验证 | 在 `test-env` 创建 90 秒后自行退出并自动移除的隔离测试容器；重启 API 改变其 `StartedAt`。Exec 验证容器身份、PTY 输入输出、resize 与退出；非法容器参数在建立 SSH 前被拒绝。 |
 | Docker 启停实机验证 | 在 `test-env` 的隔离临时容器上验证启动 API 将 created 变为 running，停止 API 执行成功且由 Docker 自动清理容器；不存在容器返回真实失败，非法操作返回 422，未知主机返回 404。页面点击启动后显示 running 并切换为停止按钮；停止确认对话框与深浅主题已检查，临时容器已清理。 |
 | Docker Exec 滚动检查 | 从容器列表底部点击 Exec，页面滚动位置由 612 变为 0，顶部终端可见；深浅主题均已检查。 |
 | Docker 页面检查 | 实际通过 Exec 按钮进入容器，验证命令回显、PTY 和 shell 退出；已检查深浅主题及停止容器的 Exec 禁用状态。修正了 resize 可能抢在 auth 首帧前发出的握手顺序，并以服务端 `ready` 标记 PTY 就绪。 |
+| 进程管理验证（2026-11-12） | `backend/.venv/bin/python scripts/verify-process-backend.py`（8 项）与 `node scripts/verify-process-store.mjs` 通过；测试主机上两个临时进程分别经 HTTP API 接收 SIGTERM/SIGKILL 后退出，过期启动标识及重复终止已退出进程均被拒绝，临时进程已清理；1440×900 浅色主题已检查真实列表、刷新、显式 sudo、确认与两种信号按钮。 |
 | 已删除功能核对 | 源码已无公共随行终端组件、独立日志窗、关联开关和 `terminalHistory` 模拟输出状态。 |
 
-以上验证覆盖列表切换、Docker 启停/重启/Exec、Exec 顶部滚动与界面移除调整；任务写入、启禁用和试运行仍未对接远端，其他页面列表的演示数据与过期数据问题仍见第一节。
+以上验证覆盖进程管理与列表切换、Docker 运行参数与启停/重启/Exec、Exec 顶部滚动与界面移除调整；任务写入、启禁用和试运行仍未对接远端，其他页面列表的演示数据与过期数据问题仍见第一节。

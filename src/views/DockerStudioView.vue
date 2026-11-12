@@ -1,12 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick } from 'vue'
+import { ref, watch, onMounted, nextTick } from 'vue'
 import RealXtermTerminal from '@/components/terminal/RealXtermTerminal.vue'
+import DockerContainerDetails from '@/components/docker/DockerContainerDetails.vue'
 import type { DockerContainerItem, DockerExecTarget } from '@/types'
 import {
   store,
   navigateWithContext,
-  executeTerminalCommand,
-  showToast,
   removeDockerContainer,
   restartDockerContainer,
   controlDockerContainer,
@@ -16,26 +15,46 @@ import {
   Container,
   Terminal,
   FolderOpen,
-  ShieldAlert,
-  ShieldCheck,
   RotateCw,
-  ArrowLeftRight,
-  Star,
   Trash2,
   HardDrive,
   Play,
   Square,
   Loader2,
+  ChevronDown,
   X
 } from 'lucide-vue-next'
 
 const dockerSudo = ref(false)
 const execTarget = ref<DockerExecTarget | null>(null)
 const pageScrollEl = ref<HTMLDivElement | null>(null)
+const expandedContainers = ref<Set<string>>(new Set())
+
+function toggleDetails(id: string) {
+  if (expandedContainers.value.has(id)) expandedContainers.value.delete(id)
+  else expandedContainers.value.add(id)
+}
+
+function restartPolicyLabel(container: DockerContainerItem) {
+  if (!container.restartPolicy) return '未读取'
+  return container.restartPolicy + (container.restartPolicy === 'on-failure' && container.restartMaxRetries ? `:${container.restartMaxRetries}` : '')
+}
+
+function openPort(container: DockerContainerItem, port: DockerContainerItem['ports'][number]) {
+  if (!port.hostPort || port.protocol === 'sctp') return
+  navigateWithContext({
+    sourcePage: 'P5_DOCKER', targetPage: 'P8_FIREWALL',
+    reason: `查看容器 ${container.name} 宿主机端口 ${port.hostPort} 的防火墙规则`,
+    highlightPort: port.hostPort,
+    prefillFirewallProtocol: port.protocol,
+    prefillFirewallComment: `Docker ${container.name}`
+  })
+}
 
 watch(() => store.activeHostId, () => {
   execTarget.value = null
   dockerSudo.value = false
+  expandedContainers.value.clear()
 }, { flush: 'sync' })
 
 onMounted(() => {
@@ -91,43 +110,6 @@ async function confirmRemove(name: string, running: boolean) {
   await removeDockerContainer(name, running, withVols)
 }
 
-const dockerRunInput = ref(
-  'docker run -d --name mysql-prod --restart always -p 3306:3306 -v /data/mysql:/var/lib/mysql -e MYSQL_ROOT_PASSWORD=secret mysql:8.4'
-)
-
-// 实时解析 docker run 为可视化结构与 Compose 预览
-const parsedDockerRun = computed(() => {
-  const raw = dockerRunInput.value.trim()
-  const nameMatch = raw.match(/--name\s+([^\s]+)/)
-  const portMatch = raw.match(/-p\s+([^\s]+)/)
-  const volMatch = raw.match(/-v\s+([^\s]+)/)
-  const restartMatch = raw.match(/--restart\s+([^\s]+)/)
-  const tokens = raw.split(/\s+/)
-  const image = tokens[tokens.length - 1] || 'nginx:alpine'
-
-  return {
-    name: nameMatch?.[1] ?? 'custom-container',
-    port: portMatch?.[1] ?? '8080:80',
-    volume: volMatch?.[1] ?? '/opt/data:/data',
-    restart: restartMatch?.[1] ?? 'unless-stopped',
-    image
-  }
-})
-
-function saveDockerRunAsSnippet() {
-  store.savedSnippets.unshift({
-    id: `snip-dk-${Date.now()}`,
-    title: `创建容器 ${parsedDockerRun.value.name}`,
-    category: 'Docker 运维',
-    commandTemplate: dockerRunInput.value,
-    description: '由 Docker 可视化向导一键转存的容器部署命令',
-    variables: [],
-    scope: 'global',
-    usageCount: 1,
-    source: 'gui-saved'
-  })
-  showToast('已将该 docker run 部署命令加入常用命令库！')
-}
 </script>
 
 <template>
@@ -156,7 +138,7 @@ function saveDockerRunAsSnippet() {
             <span>Docker 容器与编排</span>
           </h1>
           <p class="text-xs text-slate-400 mt-0.5">
-            容器实例运行状态、资源占用与端口映射管理。
+            查看网络模式、重启策略与运行参数，管理容器生命周期。
           </p>
         </div>
         <div class="flex items-center gap-3 text-xs text-slate-300">
@@ -175,20 +157,20 @@ function saveDockerRunAsSnippet() {
       </div>
       <p v-else-if="store.dockerContainers.length === 0" role="status" class="p-4 text-xs text-slate-400">当前服务器未返回容器。</p>
       <div tabindex="0" role="region" aria-labelledby="docker-table-heading" class="table-wrapper">
-        <table class="text-left text-xs" style="--label-2: '资源占用'; --label-3: '端口映射与防火墙'; --label-4: '存储卷挂载'">
+        <table class="table-fixed text-left text-xs" style="--label-2: '状态与重启策略'; --label-3: '网络与端口'; --label-4: '存储卷挂载'">
+          <colgroup><col class="w-[22%]" /><col class="w-[18%]" /><col class="w-[21%]" /><col class="w-[21%]" /><col class="w-[18%]" /></colgroup>
           <thead class="bg-slate-950 text-slate-400 text-[11px] border-b border-slate-800">
             <tr>
               <th class="py-2.5 px-3">容器名 / 镜像</th>
-              <th class="py-2.5 px-3">状态 / CPU & 内存</th>
-              <th class="py-2.5 px-3">端口映射 (点击联动防火墙)</th>
+              <th class="py-2.5 px-3">状态 / 重启策略</th>
+              <th class="py-2.5 px-3">网络 / 端口映射</th>
               <th class="py-2.5 px-3">宿主机数据卷挂载 (点击直达文件管理)</th>
               <th class="py-2.5 px-3 text-right">容器管控</th>
             </tr>
           </thead>
           <tbody class="[&>tr:last-child>*]:border-b-0">
+            <template v-for="c in store.dockerContainers" :key="c.id">
             <tr
-              v-for="c in store.dockerContainers"
-              :key="c.id"
               :class="[
                 'hover:bg-slate-800/50 transition',
                 store.lastJumpContext?.filterContainer === c.id ? 'bg-sky-500/10' : ''
@@ -197,7 +179,7 @@ function saveDockerRunAsSnippet() {
               <th class="py-3 px-3 font-medium text-slate-100 align-top text-left border-b border-slate-800">
                 <div class="flex items-center gap-2">
                   <span :class="['w-2 h-2 rounded-full', c.status === 'running' ? 'bg-emerald-400' : 'bg-amber-400']" />
-                  <span class="font-bold">{{ c.name }}</span>
+                  <span class="font-bold break-all">{{ c.name }}</span>
                   <span
                     v-if="c.composeProject"
                     class="px-1.5 py-0.5 text-[10px] rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30"
@@ -205,60 +187,54 @@ function saveDockerRunAsSnippet() {
                     stack: {{ c.composeProject }}
                   </span>
                 </div>
-                <div class="font-mono text-[11px] text-slate-400 mt-0.5">{{ c.image }}</div>
+                <div class="font-mono text-[11px] text-slate-400 mt-0.5 break-all">{{ c.image }}</div>
+                <button type="button" :aria-label="`${expandedContainers.has(c.id) ? '收起' : '查看'}容器 ${c.name} 参数`" :aria-expanded="expandedContainers.has(c.id)" :aria-controls="`docker-details-${c.id}`"
+                  @click="toggleDetails(c.id)" class="inline-flex items-center gap-1 mt-2 text-sky-300 hover:underline cursor-pointer">
+                  <ChevronDown :class="['w-3 h-3 transition-transform', expandedContainers.has(c.id) ? 'rotate-180' : '']" />
+                  {{ expandedContainers.has(c.id) ? '收起参数' : '查看参数' }}
+                </button>
               </th>
 
               <td class="py-3 px-3 font-mono align-top border-b border-slate-800">
                 <div class="text-slate-300">{{ containerStateLabel(c) }}</div>
-                <div class="text-emerald-400">CPU {{ c.cpuPercent }}%</div>
-                <div class="text-slate-400 text-[11px]">MEM {{ c.memMb }} MB</div>
-                <div v-if="c.diskUsage" class="flex items-center gap-1 text-sky-300 text-[11px]" title="容器可写层占用 (virtual 含镜像层)">
-                  <HardDrive class="w-3 h-3" /><span>磁盘 {{ c.diskUsage }}</span>
+                <div class="text-slate-300 mt-1 break-all">重启 {{ restartPolicyLabel(c) }}</div>
+                <span v-if="c.healthStatus" :class="['inline-block rounded px-1.5 py-0.5 mt-1', c.healthStatus === 'healthy' ? 'bg-emerald-500/15 text-emerald-300' : c.healthStatus === 'unhealthy' ? 'bg-rose-500/15 text-rose-300' : 'bg-amber-500/15 text-amber-200']">{{ c.healthStatus }}</span>
+                <div v-else class="text-slate-400 text-[11px] mt-1">{{ c.detailsAvailable ? '未配置健康检查' : '详情未读取' }}</div>
+                <div v-if="c.diskUsage" class="flex items-start gap-1 mt-1 text-sky-300 text-[11px]" title="容器可写层占用 (virtual 含镜像层)">
+                  <HardDrive class="w-3 h-3 shrink-0 mt-0.5" /><span class="break-words">磁盘 {{ c.diskUsage }}</span>
                 </div>
               </td>
 
               <!-- 端口映射与防火墙状态联动 -->
               <td class="py-3 px-3 align-top border-b border-slate-800">
+                <span :class="['inline-block mb-2 px-1.5 py-0.5 rounded font-mono', c.networkMode === 'host' ? 'bg-sky-500/15 text-sky-300' : 'bg-slate-800 text-slate-300']">{{ c.networkMode || '网络未读取' }}</span>
+                <p v-if="c.networkMode === 'host'" class="text-slate-400 text-[11px]">共享宿主机网络</p>
+                <p v-else-if="!c.ports.length" class="text-slate-400 text-[11px]">{{ c.detailsAvailable ? '无端口发布' : '无端口信息' }}</p>
                 <div class="flex flex-wrap gap-1.5">
+                  <template v-for="p in c.networkMode === 'host' ? [] : c.ports" :key="`${p.hostIp}-${p.hostPort}-${p.containerPort}-${p.protocol}`">
                   <button
-                    v-for="p in c.ports"
-                    :key="`${p.hostPort}-${p.containerPort}-${p.protocol}`"
+                    v-if="p.hostPort && p.protocol !== 'sctp'"
                     type="button"
-                    @click="
-                      navigateWithContext({
-                        sourcePage: 'P5_DOCKER',
-                        targetPage: 'P8_FIREWALL',
-                        reason: p.firewallAllowed
-                          ? `查看容器 ${c.name} 端口 ${p.hostPort} 的防火墙规则`
-                          : `为容器 ${c.name} 放行宿主机映射端口 ${p.hostPort}`,
-                        prefillFirewallPort: p.firewallAllowed ? undefined : p.hostPort,
-                        prefillFirewallProtocol: p.protocol,
-                        prefillFirewallComment: `Docker ${c.name}`,
-                        highlightPort: p.hostPort
-                      })
-                    "
-                    :class="[
-                      'flex items-center gap-1 px-2 py-0.5 rounded font-mono text-[11px] border cursor-pointer',
-                      p.firewallAllowed
-                        ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
-                        : 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
-                    ]"
+                    @click="openPort(c, p)"
+                    :title="`${p.hostIp || '宿主机'}:${p.hostPort} → ${p.containerPort}/${p.protocol}；点击查看防火墙规则，放行状态未核验`"
+                    class="max-w-full break-all text-left px-2 py-0.5 rounded font-mono text-[11px] border bg-sky-500/15 text-sky-300 border-sky-500/30 hover:bg-sky-500/25 cursor-pointer"
                   >
-                    <ShieldCheck v-if="p.firewallAllowed" class="w-3 h-3" />
-                    <ShieldAlert v-else class="w-3 h-3" />
-                    <span>{{ p.hostPort }}→{{ p.containerPort }}</span>
-                    <span v-if="!p.firewallAllowed" class="text-[10px] underline ml-0.5">去放行</span>
+                    {{ p.hostIp?.includes(':') ? `[${p.hostIp}]` : p.hostIp || '*' }}:{{ p.hostPort }}→{{ p.containerPort }}/{{ p.protocol }}
                   </button>
+                  <span v-else class="px-2 py-0.5 rounded bg-slate-800 font-mono text-[11px] text-slate-300">{{ p.hostPort ? `${p.hostPort}→` : '' }}{{ p.containerPort }}/{{ p.protocol }}{{ p.hostPort ? '' : ' · 未发布' }}</span>
+                  </template>
                 </div>
               </td>
 
               <!-- 存储卷宿主机目录直达 -->
               <td class="py-3 px-3 align-top border-b border-slate-800">
-                <div class="flex flex-col items-start gap-1 min-w-[260px]">
+                <p v-if="!c.volumes.length" class="text-slate-400 text-[11px]">{{ c.detailsAvailable ? '无挂载' : '挂载未读取' }}</p>
+                <div class="flex flex-col items-start gap-1">
                   <button
                     v-for="v in c.volumes"
                     :key="v.hostPath + v.containerPath"
-                    :title="`${v.hostPath} → ${v.containerPath}`"
+                    :title="`${v.type} · ${v.hostPath} → ${v.containerPath} · ${v.readOnly ? '只读' : '读写'}`"
+                    :disabled="!v.hostPath"
                     type="button"
                     @click="
                       navigateWithContext({
@@ -268,18 +244,19 @@ function saveDockerRunAsSnippet() {
                         openPath: v.hostPath
                       })
                     "
-                    class="flex items-center gap-1.5 max-w-full px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono text-[11px] cursor-pointer"
+                    class="flex items-center gap-1.5 w-full min-w-0 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono text-[11px] cursor-pointer"
                   >
                     <FolderOpen class="w-3 h-3 shrink-0" />
-                    <span class="truncate max-w-[200px]">{{ v.hostPath }}</span>
-                    <span class="text-slate-400 shrink-0 whitespace-nowrap">→ {{ v.containerPath }}</span>
+                    <span class="truncate min-w-0 flex-1">{{ v.hostPath || v.type }}</span>
+                    <span class="text-slate-400 truncate max-w-[45%]">→ {{ v.containerPath }}</span>
+                    <span class="shrink-0">{{ v.readOnly ? 'RO' : 'RW' }}</span>
                   </button>
                 </div>
               </td>
 
               <!-- 容器动作：启停 / Exec / 重启 / 删除 -->
-              <td class="py-3 px-3 text-right align-top whitespace-nowrap border-b border-slate-800">
-                <div class="inline-flex items-center gap-1.5 whitespace-nowrap">
+              <td class="py-3 px-3 text-right align-top border-b border-slate-800">
+                <div class="flex flex-wrap justify-end items-center gap-1.5">
                   <button
                     type="button"
                     @click="toggleContainer(c)"
@@ -327,66 +304,14 @@ function saveDockerRunAsSnippet() {
                 </div>
               </td>
             </tr>
+            <tr v-if="expandedContainers.has(c.id)" :id="`docker-details-${c.id}`" class="container-detail-row">
+              <td colspan="5" class="p-3 border-b border-slate-800">
+                <DockerContainerDetails :container="c" />
+              </td>
+            </tr>
+            </template>
           </tbody>
         </table>
-      </div>
-    </div>
-
-    <!-- 下半区：一行 docker run 与可视化表单 / Compose YAML 双向互转器 -->
-    <div class="rounded-xl bg-slate-900/90 border border-slate-800 p-4 space-y-3">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-2 text-xs font-bold text-slate-100">
-          <ArrowLeftRight class="w-4 h-4 text-cyan-400" />
-          <span><code>docker run</code> 命令 ↔ 可视化配置表单 & Compose 双向解析器</span>
-        </div>
-
-        <div class="flex items-center gap-2">
-          <button
-            type="button"
-            @click="saveDockerRunAsSnippet"
-            class="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs cursor-pointer"
-          >
-            <Star class="w-3.5 h-3.5" />
-            <span>存为常用命令</span>
-          </button>
-          <button
-            type="button"
-            @click="executeTerminalCommand(dockerRunInput)"
-            class="px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer"
-          >
-            立即部署执行
-          </button>
-        </div>
-      </div>
-
-      <input
-        v-model="dockerRunInput"
-        type="text"
-        aria-label="docker run 命令输入"
-        class="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 font-mono text-xs text-cyan-300 focus:border-cyan-400 focus:outline-none"
-      />
-
-      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
-        <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
-          <div class="text-[10px] text-slate-400">解析容器名称 (--name)</div>
-          <div class="font-mono font-bold text-slate-100 mt-0.5">{{ parsedDockerRun.name }}</div>
-        </div>
-        <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
-          <div class="text-[10px] text-slate-400">目标镜像 (Image)</div>
-          <div class="font-mono font-bold text-sky-300 mt-0.5">{{ parsedDockerRun.image }}</div>
-        </div>
-        <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
-          <div class="text-[10px] text-slate-400">端口映射 (-p)</div>
-          <div class="font-mono font-bold text-emerald-300 mt-0.5">{{ parsedDockerRun.port }}</div>
-        </div>
-        <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
-          <div class="text-[10px] text-slate-400">持久化挂载 (-v)</div>
-          <div class="font-mono font-bold text-amber-300 truncate mt-0.5">{{ parsedDockerRun.volume }}</div>
-        </div>
-        <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800">
-          <div class="text-[10px] text-slate-400">重启策略 (--restart)</div>
-          <div class="font-mono font-bold text-indigo-300 mt-0.5">{{ parsedDockerRun.restart }}</div>
-        </div>
       </div>
     </div>
   </div>

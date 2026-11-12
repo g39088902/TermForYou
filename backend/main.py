@@ -13,6 +13,7 @@ from models import (
     TerminalAuthPayload,
     DockerRestartPayload,
     DockerActionPayload,
+    ProcessSignalPayload,
     CreateHostPayload,
     SetCredentialPayload,
     WriteFilePayload,
@@ -209,6 +210,18 @@ async def inspect_host_endpoint(host_alias: str):
     if not host_info:
         raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
     return await metrics_service.fetch_full_inspection(host_alias)
+
+@app.get("/api/v1/ssh/processes/{host_alias}")
+async def list_processes_endpoint(host_alias: str):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.list_processes(host_alias)
+
+@app.post("/api/v1/ssh/processes/{host_alias}/kill")
+async def signal_process_endpoint(host_alias: str, payload: ProcessSignalPayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.signal_process(host_alias, payload)
 
 @app.get("/api/v1/ssh/config-path")
 async def get_config_info():

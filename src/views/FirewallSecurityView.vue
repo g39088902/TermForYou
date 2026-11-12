@@ -73,7 +73,7 @@ const portComparisonMatrix = computed(() => {
       pid: p.pid,
       isDocker: Boolean(p.dockerContainerId),
       dockerId: p.dockerContainerId,
-      allowed: Boolean(p.firewallAllowed)
+      allowed: p.firewallAllowed ?? null
     }))
 })
 
@@ -173,7 +173,7 @@ function saveFirewallRuleToSnippets() {
             'p-3 rounded-xl border flex flex-col justify-between gap-2 transition',
             item.allowed
               ? 'bg-slate-950/80 border-emerald-500/30'
-              : 'bg-amber-950/25 border-amber-500/50'
+              : item.allowed === false ? 'bg-amber-950/25 border-amber-500/50' : 'bg-slate-950/80 border-slate-700'
           ]"
         >
           <div class="flex items-start justify-between">
@@ -191,12 +191,12 @@ function saveFirewallRuleToSnippets() {
                 'px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1',
                 item.allowed
                   ? 'bg-emerald-500/15 text-emerald-300'
-                  : 'bg-amber-500/20 text-amber-300'
+                  : item.allowed === false ? 'bg-amber-500/15 text-amber-800 dark:text-amber-200' : 'bg-slate-500/15 text-slate-600 dark:text-slate-300'
               ]"
             >
               <ShieldCheck v-if="item.allowed" class="w-3 h-3" />
               <ShieldAlert v-else class="w-3 h-3" />
-              {{ item.allowed ? '已监听 & 已放行' : '已监听但被拦截' }}
+              {{ item.allowed ? '已监听 & 已放行' : item.allowed === false ? '已监听但被拦截' : '已监听 · 放行状态未知' }}
             </span>
           </div>
 
@@ -220,7 +220,7 @@ function saveFirewallRuleToSnippets() {
             </button>
 
             <button
-              v-if="!item.allowed"
+              v-if="item.allowed === false"
               type="button"
               @click="
                 () => {

@@ -7,6 +7,8 @@ import type {
   FileEntry,
   DiskUsageItem,
   ProcessItem,
+  ProcessSignal,
+  ProcessActionResponse,
   CronTaskItem,
   SystemdServiceItem,
   DockerContainerItem,
@@ -307,77 +309,11 @@ WantedBy=multi-user.target`
     }
   ] as FileEntry[],
 
-  // 进程监控列表 (含端口监听与跨模块标识)
-  processes: [
-    {
-      pid: 1042,
-      ppid: 1,
-      name: 'nginx',
-      cmdline: 'nginx: master process /usr/sbin/nginx -g daemon on;',
-      user: 'root',
-      state: 'S',
-      cpuPercent: 4.2,
-      memPercent: 2.1,
-      memRssMb: 342,
-      listenPort: 443,
-      protocol: 'tcp',
-      firewallAllowed: true,
-      cwd: '/etc/nginx',
-      systemdUnit: 'nginx.service',
-      uptime: '48d 14h'
-    },
-    {
-      pid: 2891,
-      ppid: 1,
-      name: 'api-core',
-      cmdline: '/opt/api-core/bin/server --port 8080 --env prod',
-      user: 'www-data',
-      state: 'R',
-      cpuPercent: 18.6,
-      memPercent: 14.5,
-      memRssMb: 2380,
-      listenPort: 8080,
-      protocol: 'tcp',
-      firewallAllowed: false, // 重点演示：已监听但未在防火墙放行！
-      cwd: '/opt/api-core',
-      systemdUnit: 'api-core.service',
-      uptime: '12d 06h'
-    },
-    {
-      pid: 4120,
-      ppid: 980,
-      name: 'redis-server',
-      cmdline: 'redis-server 0.0.0.0:6379 [docker: redis-cache-01]',
-      user: '999',
-      state: 'S',
-      cpuPercent: 6.8,
-      memPercent: 8.4,
-      memRssMb: 1376,
-      listenPort: 6379,
-      protocol: 'tcp',
-      firewallAllowed: true,
-      cwd: '/var/lib/docker/volumes/redis_data/_data',
-      dockerContainerId: 'c-redis-01',
-      uptime: '19d 22h'
-    },
-    {
-      pid: 5310,
-      ppid: 1,
-      name: 'node-exporter',
-      cmdline: '/usr/local/bin/node_exporter --web.listen-address=:9100',
-      user: 'prometheus',
-      state: 'S',
-      cpuPercent: 1.1,
-      memPercent: 0.6,
-      memRssMb: 96,
-      listenPort: 9100,
-      protocol: 'tcp',
-      firewallAllowed: false,
-      cwd: '/var/lib/node_exporter',
-      systemdUnit: 'node-exporter.service',
-      uptime: '48d 14h'
-    }
-  ] as ProcessItem[],
+  // Only actual process snapshots may be used as signal targets.
+  processes: [] as ProcessItem[],
+  processesLoading: false,
+  processesError: '',
+  processActions: {} as Record<string, ProcessSignal>,
 
   // 当前服务器的计划任务；切换时清空，等待真实巡检结果。
   cronTasks: [] as CronTaskItem[],
@@ -1034,6 +970,66 @@ export async function fetchHostMetrics(hostId: string) {
   }
 }
 
+let processRequestVersion = 0
+let processHostVersion = 0
+let inspectionProcessVersion = 0
+
+export async function refreshProcesses(hostId = store.activeHostId): Promise<boolean> {
+  if (!hostId || hostId !== store.activeHostId) return false
+  const version = ++processRequestVersion
+  store.processesLoading = true
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/processes/${encodeURIComponent(hostId)}`)
+    const data = await res.json()
+    if (version !== processRequestVersion || store.activeHostId !== hostId) return false
+    if (!res.ok || data.status !== 'ok' || !Array.isArray(data.processes)) {
+      throw new Error(data.message || data.processesError || '无法读取进程列表')
+    }
+    store.processes = data.processes
+    store.processesError = ''
+    return true
+  } catch (error) {
+    if (version === processRequestVersion && store.activeHostId === hostId) {
+      store.processes = []
+      store.processesError = error instanceof Error ? error.message : '读取失败，请重试'
+    }
+    return false
+  } finally {
+    if (version === processRequestVersion && store.activeHostId === hostId) store.processesLoading = false
+  }
+}
+
+export async function signalProcess(proc: ProcessItem, signal: ProcessSignal, sudo = false, hostId = store.activeHostId): Promise<boolean> {
+  if (!hostId || hostId !== store.activeHostId || !proc.identity || proc.pid <= 1 || proc.state === 'Z') return false
+  if (!store.processes.some(p => p.pid === proc.pid && p.identity === proc.identity)) return false
+  const key = `${hostId}/${proc.pid}`
+  if (store.processActions[key]) return false
+  const hostVersion = processHostVersion
+  store.processActions[key] = signal
+  // Invalidate snapshots started before this mutation.
+  ++processRequestVersion
+  store.processesLoading = false
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/processes/${encodeURIComponent(hostId)}/kill`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pid: proc.pid, identity: proc.identity, signal, sudo })
+    })
+    const data: ProcessActionResponse = await res.json()
+    const ok = res.ok && data.status === 'ok'
+    if (store.activeHostId === hostId && hostVersion === processHostVersion) {
+      const detail = typeof data.detail === 'string' ? data.detail : data.detail?.map(d => d.msg).join('；')
+      showToast(ok ? data.message || `已向 PID ${proc.pid} 发送 ${signal}` : `操作失败：${data.message || detail || '后端服务异常'}`)
+    }
+    return ok
+  } catch {
+    if (store.activeHostId === hostId && hostVersion === processHostVersion) showToast('未能确认信号发送结果，请刷新进程状态后再操作')
+    return false
+  } finally {
+    if (store.activeHostId === hostId && hostVersion === processHostVersion) await refreshProcesses(hostId)
+    delete store.processActions[key]
+  }
+}
+
 export async function restartDockerContainer(containerId: string, sudo = false): Promise<boolean> {
   return controlDockerContainer(containerId, 'restart', sudo)
 }
@@ -1092,6 +1088,8 @@ let inspectionRequestVersion = 0
 
 function beginInspectionLoad(hostId: string): number {
   if (store.activeHostId !== hostId) return -1
+  inspectionProcessVersion = ++processRequestVersion
+  store.processesLoading = true
   store.cronTasksLoading = true
   store.cronTasksError = ''
   store.dockerContainersLoading = true
@@ -1102,9 +1100,19 @@ function beginInspectionLoad(hostId: string): number {
 function finishInspectionLoad(
   hostId: string,
   version: number,
-  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; message?: string }
+  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; processes?: ProcessItem[]; processesError?: string; message?: string }
 ) {
   if (version !== inspectionRequestVersion || store.activeHostId !== hostId) return
+  if (inspectionProcessVersion === processRequestVersion) {
+    store.processesLoading = false
+    if (data?.status === 'ok' && Array.isArray(data.processes) && !data.processesError) {
+      store.processes = data.processes
+      store.processesError = ''
+    } else {
+      store.processes = []
+      store.processesError = data?.processesError || data?.message || '未能读取当前服务器的进程列表，请重试'
+    }
+  }
   store.cronTasksLoading = false
   if (data?.status === 'ok' && Array.isArray(data.cronTasks)) {
     store.cronTasks = data.cronTasks
@@ -1162,9 +1170,6 @@ export async function inspectHost(hostId: string) {
 
       // 2. 若是当前正在操作的主机，深度实装所有页面含有的真实数据
       if (store.activeHostId === hostId) {
-        if (Array.isArray(data.processes) && data.processes.length > 0) {
-          store.processes = data.processes
-        }
         if (Array.isArray(data.systemdServices) && data.systemdServices.length > 0) {
           store.systemdServices = data.systemdServices
         }
@@ -1258,7 +1263,6 @@ export async function probeHost(hostId: string) {
         }
 
         if (store.activeHostId === hostId) {
-          if (Array.isArray(insp.processes) && insp.processes.length > 0) store.processes = insp.processes
           if (Array.isArray(insp.systemdServices) && insp.systemdServices.length > 0) store.systemdServices = insp.systemdServices
           if (Array.isArray(insp.firewallRules) && insp.firewallRules.length > 0) store.firewallRules = insp.firewallRules
           if (insp.cwd && !host.currentCwd) host.currentCwd = insp.cwd
@@ -1365,6 +1369,11 @@ watch(
   () => store.activeHostId,
   (newId) => {
     ++inspectionRequestVersion
+    ++processRequestVersion
+    ++processHostVersion
+    store.processes = []
+    store.processesError = ''
+    store.processesLoading = !!newId
     store.cronTasks = []
     store.cronTasksError = ''
     store.cronTasksLoading = !!newId

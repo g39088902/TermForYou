@@ -9,6 +9,8 @@ from typing import Optional, Dict, Any, List
 import asyncssh
 
 from ssh_config_parser import find_host_by_alias
+from models import DockerContainerInfo, ProcessSignalPayload
+from process_manager import PROCESS_LIST_CODE, PROCESS_SIGNAL_CODE
 
 # 远端极简采集脚本，优先 python3，其次 awk/sh
 REMOTE_COLLECT_SCRIPT = r'''python3 -c '
@@ -232,62 +234,7 @@ def run_cmd(cmd, timeout=3):
 
 data = {}
 
-# 1. 进程列表与监听端口映射 (Processes & Listening Ports)
-ports_map = {}
-ss_out = run_cmd(['ss', '-tulnp'], timeout=2)
-if ss_out:
-    for line in ss_out.splitlines()[1:]:
-        parts = line.split()
-        if len(parts) >= 5:
-            proto = 'tcp' if 'tcp' in parts[0].lower() else 'udp'
-            local_addr = parts[4]
-            port = int(local_addr.rsplit(':', 1)[-1]) if ':' in local_addr else None
-            pid = None
-            if 'pid=' in line:
-                try:
-                    pid = int(line.split('pid=')[1].split(',')[0])
-                except Exception:
-                    pass
-            if port and pid:
-                ports_map[pid] = (proto, port)
-
-processes = []
-ps_out = run_cmd(['ps', '-eo', 'pid,ppid,user,stat,%cpu,%mem,rss,args', '--sort=-%cpu'], timeout=2)
-if ps_out:
-    for l in ps_out.strip().splitlines()[1:36]:
-        parts = l.split(None, 7)
-        if len(parts) >= 8:
-            try:
-                pid = int(parts[0])
-                ppid = int(parts[1])
-                user = parts[2]
-                stat = parts[3][:1]
-                if stat not in ['R', 'S', 'D', 'Z']: stat = 'S'
-                cpu = float(parts[4])
-                mem = float(parts[5])
-                rss_mb = round(int(parts[6]) / 1024, 1)
-                args = parts[7]
-                name = args.split()[0].rsplit('/', 1)[-1]
-                p_proto, p_port = ports_map.get(pid, (None, None))
-                processes.append({
-                    'pid': pid,
-                    'ppid': ppid,
-                    'name': name,
-                    'cmdline': args[:240],
-                    'user': user,
-                    'state': stat,
-                    'cpuPercent': cpu,
-                    'memPercent': mem,
-                    'memRssMb': rss_mb,
-                    'listenPort': p_port,
-                    'protocol': p_proto,
-                    'firewallAllowed': True if p_port else False,
-                    'cwd': f'/proc/{pid}/cwd',
-                    'uptime': '活跃中'
-                })
-            except Exception:
-                pass
-data['processes'] = processes
+# PROCESS_LIST_CODE
 
 # 2. Docker 容器列表 (Docker Containers)
 containers = []
@@ -295,24 +242,60 @@ if shutil.which('docker'):
     dk_out = run_cmd(['docker', 'ps', '-a', '--no-trunc', '--format', '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{.CreatedAt}}|{{.Size}}'], timeout=10)
     if not dk_out:
         dk_out = run_cmd(['docker', 'ps', '-a', '--no-trunc', '--format', '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.State}}|{{.Ports}}|{{.CreatedAt}}|'], timeout=3)
-    mounts_map = {}
-    mt_out = run_cmd(['docker', 'inspect', '-f', '{{.Id}}|{{range .Mounts}}{{.Type}}:{{.Source}}:{{.Destination}};{{end}}', *[x.split('|')[0] for x in (dk_out or '').strip().splitlines()[:25] if x]], timeout=8) if dk_out else ''
-    for ml in mt_out.strip().splitlines():
-        if '|' not in ml: continue
-        mid, mv = ml.split('|', 1)
-        vols = []
-        for item in mv.split(';'):
-            parts = item.split(':')
-            if len(parts) >= 3 and parts[0] in ('bind', 'volume'):
-                vols.append({'hostPath': parts[1], 'containerPath': ':'.join(parts[2:]), 'type': parts[0]})
-        mounts_map[mid[:12]] = vols
+    # Project only operational fields: never collect Env, command arguments or arbitrary labels.
+    inspect_fields = [
+        '.Id', '.Created', '.State.StartedAt', '.State.FinishedAt', '.State.ExitCode',
+        '.State.OOMKilled', '.RestartCount', '.HostConfig.NetworkMode',
+        '.HostConfig.RestartPolicy', '.HostConfig.Memory', '.HostConfig.NanoCpus',
+        '.HostConfig.CpuQuota', '.HostConfig.CpuPeriod', '.HostConfig.CpusetCpus',
+        '.HostConfig.Privileged', '.HostConfig.ReadonlyRootfs', '.Config.User',
+        '.Mounts', '.NetworkSettings.Networks', '.NetworkSettings.Ports',
+        '.Config.ExposedPorts',
+        'composeProject', 'composeService',
+        '.HostConfig.PortBindings', '.HostConfig.Tmpfs'
+    ]
+    templates = []
+    for field in inspect_fields:
+        if field.startswith('.'):
+            # index tolerates absent optional keys (Tmpfs, ExposedPorts, etc.).
+            keys = ' '.join(json.dumps(key) for key in field[1:].split('.'))
+            templates.append('{{json (index . ' + keys + ')}}')
+        else:
+            label = 'com.docker.compose.' + ('project' if field == 'composeProject' else 'service')
+            templates.append('{{with (index .Config ' + json.dumps('Labels') + ')}}{{json (index . ' + json.dumps(label) + ')}}{{else}}null{{end}}')
+    inspect_format = '[' + ','.join(templates)
+    inspect_format += ',{{with (index .State \"Health\")}}{{json .Status}}{{else}}null{{end}}]'
+    ids = [x.split('|')[0] for x in (dk_out or '').strip().splitlines()[:25] if x]
+    inspect_out = run_cmd(['docker', 'inspect', '--format', inspect_format, *ids], timeout=3) if ids else ''
+    details_map = {}
+    for detail_line in inspect_out.splitlines():
+        try:
+            values = json.loads(detail_line)
+            detail = dict(zip(inspect_fields + ['health'], values))
+            details_map[detail['.Id']] = detail
+        except (ValueError, TypeError, KeyError):
+            continue
     if dk_out:
         for line in dk_out.strip().splitlines()[:25]:
             if not line: continue
             try:
                 cid, cname, cimg, cstatus, cstate, cports, ccreated, csize = line.split('|', 7)
+                detail = details_map.get(cid, {})
                 parsed_ports = []
-                if cports:
+                if detail:
+                    bindings = detail.get('.NetworkSettings.Ports') or detail.get('.HostConfig.PortBindings') or {}
+                    exposed = detail.get('.Config.ExposedPorts') or {}
+                    for port_key in sorted(set(bindings) | set(exposed)):
+                        port, proto = port_key.split('/', 1)
+                        if proto not in ('tcp', 'udp', 'sctp'): continue
+                        for binding in bindings.get(port_key) or [None]:
+                            parsed_ports.append({
+                                'hostPort': int(binding.get('HostPort') or 0) if binding else 0,
+                                'hostIp': binding.get('HostIp', '') if binding else '',
+                                'containerPort': int(port), 'protocol': proto,
+                                'firewallAllowed': None
+                            })
+                elif cports:
                     for p in cports.split(','):
                         p = p.strip()
                         h_port = 0
@@ -323,29 +306,63 @@ if shutil.which('docker'):
                             if ':' in left: h_port = int(left.rsplit(':', 1)[-1])
                             c_part = right.split('/')[0]
                             if c_part.isdigit(): c_port = int(c_part)
-                            if '/udp' in right: proto = 'udp'
+                            proto = right.split('/')[-1] if '/' in right else 'tcp'
                         elif '/' in p:
                             c_part = p.split('/')[0]
                             if c_part.isdigit(): c_port = int(c_part)
-                            if '/udp' in p: proto = 'udp'
-                        if (h_port or c_port) and not any(x['hostPort'] == (h_port or c_port) and x['containerPort'] == (c_port or h_port) and x['protocol'] == proto for x in parsed_ports):
+                            proto = p.split('/')[-1]
+                        if (h_port or c_port) and not any(x['hostPort'] == h_port and x['containerPort'] == (c_port or h_port) and x['protocol'] == proto for x in parsed_ports):
                             parsed_ports.append({
-                                'hostPort': h_port or c_port,
+                                'hostPort': h_port,
                                 'containerPort': c_port or h_port,
                                 'protocol': proto,
-                                'firewallAllowed': True
+                                'firewallAllowed': None
                             })
+                restart = detail.get('.HostConfig.RestartPolicy') or {}
+                nanos = detail.get('.HostConfig.NanoCpus') or 0
+                quota = detail.get('.HostConfig.CpuQuota') or 0
+                period = detail.get('.HostConfig.CpuPeriod') or 100000
+                cpu_limit = nanos / 1e9 if nanos > 0 else (quota / period if quota > 0 else 0)
+                volumes = [{
+                    'hostPath': m.get('Source', ''), 'containerPath': m.get('Destination', ''),
+                    'type': m.get('Type', ''), 'readOnly': not m.get('RW', True)
+                } for m in detail.get('.Mounts') or []]
+                for destination, options in (detail.get('.HostConfig.Tmpfs') or {}).items():
+                    if not any(v['containerPath'] == destination for v in volumes):
+                        volumes.append({'hostPath': '', 'containerPath': destination, 'type': 'tmpfs', 'readOnly': 'ro' in options.split(',')})
                 containers.append({
                     'id': cid[:12],
                     'name': cname,
                     'image': cimg,
                     'status': cstate.lower() if cstate.lower() in ('running', 'exited', 'restarting', 'created', 'paused', 'removing', 'dead') else 'unknown',
-                    'cpuPercent': 0.8 if 'up' in cstatus.lower() else 0,
-                    'memMb': 128 if 'up' in cstatus.lower() else 0,
+                    'cpuPercent': None,
+                    'memMb': None,
                     'ports': parsed_ports,
-                    'volumes': mounts_map.get(cid[:12], []),
+                    'volumes': volumes,
                     'diskUsage': csize,
-                    'createdAt': ccreated[:19]
+                    'createdAt': detail.get('.Created') or ccreated,
+                    'detailsAvailable': bool(detail),
+                    'networkMode': detail.get('.HostConfig.NetworkMode'),
+                    'networks': [{
+                        'name': name, 'ipAddress': net.get('IPAddress', ''),
+                        'ipv6Address': net.get('GlobalIPv6Address', '')
+                    } for name, net in (detail.get('.NetworkSettings.Networks') or {}).items()],
+                    'restartPolicy': restart.get('Name') if detail else None,
+                    'restartMaxRetries': restart.get('MaximumRetryCount') if detail else None,
+                    'restartCount': detail.get('.RestartCount'),
+                    'healthStatus': detail.get('health'),
+                    'startedAt': detail.get('.State.StartedAt'),
+                    'finishedAt': detail.get('.State.FinishedAt'),
+                    'exitCode': detail.get('.State.ExitCode'),
+                    'oomKilled': detail.get('.State.OOMKilled'),
+                    'memoryLimitBytes': detail.get('.HostConfig.Memory'),
+                    'cpuLimit': cpu_limit if detail else None,
+                    'cpusetCpus': detail.get('.HostConfig.CpusetCpus'),
+                    'privileged': detail.get('.HostConfig.Privileged'),
+                    'readOnlyRootfs': detail.get('.HostConfig.ReadonlyRootfs'),
+                    'runUser': detail.get('.Config.User'),
+                    'composeProject': detail.get('composeProject') or None,
+                    'composeService': detail.get('composeService') or None
                 })
             except Exception:
                 pass
@@ -529,6 +546,10 @@ data['files'] = files
 
 print(json.dumps({'status': 'ok', 'data': data}))
 " 2>/dev/null'''
+
+# Share the /proc collector between full inspection and the lightweight process API.
+_inspection_code = shlex.split(REMOTE_FULL_INSPECT_SCRIPT)[2]
+REMOTE_FULL_INSPECT_SCRIPT = "python3 -c " + shlex.quote(_inspection_code.replace("# PROCESS_LIST_CODE", PROCESS_LIST_CODE))
 
 def docker_exec_command(container: str, sudo: bool = False) -> str:
     """Only allow a Docker identifier and a fixed interactive shell command."""
@@ -813,7 +834,8 @@ class HostMetricsService:
                     "cwd": inspect_data.get("cwd", "/root"),
                     "metrics": metrics,
                     "processes": inspect_data.get("processes", []),
-                    "dockerContainers": inspect_data.get("dockerContainers", []),
+                    "processesError": inspect_data.get("processesError"),
+                    "dockerContainers": [DockerContainerInfo(**c).model_dump() for c in inspect_data.get("dockerContainers", [])],
                     "systemdServices": inspect_data.get("systemdServices", []),
                     "cronTasks": inspect_data.get("cronTasks", []),
                     "firewallRules": inspect_data.get("firewallRules", []),
@@ -836,7 +858,7 @@ class HostMetricsService:
             "files": []
         }
 
-    async def _run_remote_json_script(self, host_alias: str, py_code: str, payload: Dict[str, Any], timeout: float = 10.0) -> Dict[str, Any]:
+    async def _run_remote_json_script(self, host_alias: str, py_code: str, payload: Dict[str, Any], timeout: float = 10.0, sudo: bool = False) -> Dict[str, Any]:
         """在远端主机安全执行带 JSON 参数的 Python3 脚本并返回解析后的 JSON 结果"""
         conn, err_type, err_msg = await self._get_connection(host_alias)
         if not conn:
@@ -847,7 +869,7 @@ class HostMetricsService:
             }
 
         b64_payload = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
-        full_cmd = f"python3 -c {shlex.quote(py_code)} {shlex.quote(b64_payload)}"
+        full_cmd = ("sudo -n -- " if sudo else "") + f"python3 -c {shlex.quote(py_code)} {shlex.quote(b64_payload)}"
         try:
             res = await conn.run(full_cmd, timeout=timeout)
             out_str = (res.stdout or "").strip()
@@ -860,6 +882,15 @@ class HostMetricsService:
         except Exception as e:
             self._connections.pop(host_alias, None)
             return {"status": "error", "message": str(e)}
+
+    async def list_processes(self, host_alias: str) -> Dict[str, Any]:
+        code = "import json\ndata = {}\n" + PROCESS_LIST_CODE + "\nprint(json.dumps(dict(status='error' if data.get('processesError') else 'ok', **data)))"
+        return await self._run_remote_json_script(host_alias, code, {}, timeout=8)
+
+    async def signal_process(self, host_alias: str, payload: ProcessSignalPayload) -> Dict[str, Any]:
+        # Validate again at the service boundary; never interpolate request fields into shell code.
+        payload = ProcessSignalPayload.model_validate(payload.model_dump())
+        return await self._run_remote_json_script(host_alias, PROCESS_SIGNAL_CODE, payload.model_dump(), sudo=payload.sudo)
 
     async def restart_docker_container(self, host_alias: str, container: str, sudo: bool = False) -> Dict[str, Any]:
         return await self.control_docker_container(host_alias, container, "restart", sudo=sudo)

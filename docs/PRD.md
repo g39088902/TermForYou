@@ -73,8 +73,10 @@
 | **单会话批量指令巡检** | 探针接通后，后端通过一次 SSH 会话批量执行标准 Linux 命令并以分隔符切分，避免多次握手开销。 | P0 | [✅ 已实现] |
 | **Mini HUD 极简微缩状态条** | 全局顶部常驻当前主机的 CPU、内存利用率进度条、延迟与状态指示。 | P0 | [✅ 已实现] |
 | **性能与进程监控 (P2)** | CPU/内存利用率、Top 运行进程表（PID、User、CPU%、MEM%、命令）、监听端口列表反查。 | P0 | [✅ 已实现] |
+| **进程管理操作 (P2)** | `/proc` 真实进程快照（按自启动平均 CPU 排序前 100 项，`ss` 可选补充监听端口），5 秒/手动刷新；SIGTERM/SIGKILL 确认后经 SSH 真实发送，sudo 默认关闭。PID 与启动标识校验，支持时使用 pidfd；拒绝 PID 1、僵尸和当前操作祖先进程。同 PID 操作互斥，信号发送后刷新实际状态，切换服务器和过期回包隔离；已移除演示进程。 | P0 | [✅ 已实现] |
 | **系统服务巡检 (P6)** | 解析 Systemd 核心服务（Running/Failed 状态、是否开机自启），支持快速启停重载。 | P0 | [✅ 已实现] |
-| **Docker 容器概况 (P5)** | 获取真实容器列表、运行状态、镜像名称、端口映射；支持真实启动/停止、确认后的删除/重启，以及页面内容器 Exec 终端。停止前确认，同容器操作互斥，完成后刷新真实状态；启停/重启/Exec 的 sudo 默认关闭。点击 Exec 后页面滚到顶部终端；CPU/内存仍为占位值。 | P0 | [✅ 已实现] |
+| **Docker 容器概况 (P5)** | 获取真实容器列表、运行状态、镜像名称、端口映射；支持真实启动/停止、确认后的删除/重启，以及页面内容器 Exec 终端。停止前确认，同容器操作互斥，完成后刷新真实状态；启停/重启/Exec 的 sudo 默认关闭。点击 Exec 后页面滚到顶部终端；列表展示网络模式、重启策略与健康状态，支持展开运行参数；已移除 docker run 命令输入、解析及部署面板。 | P0 | [✅ 已实现] |
+| **Docker 运行参数 (P5)** | 单次批量 `docker inspect` 采集真实网络模式与 IPv4/IPv6、重启策略/重试次数/重启计数、健康状态、创建/启动/退出时间、退出码与 OOM、CPU/内存限制及绑核、运行用户/特权/只读根文件系统、挂载读写属性和 Compose 项目/服务。摘要常显、参数按容器展开，host/none 模式有说明；区分端口发布与仅暴露，停止容器保留配置的映射。未读取详情显示未知，移除固定 CPU/内存占用和“已放行”标记；不采集环境变量、启动参数与任意标签。 | P0 | [✅ 已实现] |
 | **安全与防火墙全景 (P8)** | 探测 UFW / Iptables 规则，提供监听端口与防火墙放行状态对照。 | P0 | [✅ 已实现] |
 | **计划任务概况 (P7)** | 提取系统与当前用户 Crontab 任务项。 | P0 | [✅ 已实现] |
 | **全屏文件管理器与代码编辑 (P3)** | 完整目录列表浏览、文件新建/重命名/删除/下载/解压缩、Chmod/Chown 权限配置，以及内置轻量代码编辑器抽屉（支持 sudo 提权保存）。 | P0 | [✅ 已实现] |
@@ -120,6 +122,8 @@
 | `/api/v1/ssh/files/{host_alias}/list` | `GET` | 远端目录文件与文件夹列表查询 | [✅ 已实现] |
 | `/api/v1/ssh/files/{host_alias}/content` | `GET`/`PUT` | 远端文件内容读取与保存（支持 sudo tee 写入） | [✅ 已实现] |
 | `/api/v1/ssh/files/{host_alias}/chmod` | `POST` | 批量/递归修改远端文件权限与所有者 | [✅ 已实现] |
+| `/api/v1/ssh/processes/{host_alias}` | `GET` | 真实进程快照，返回 `processes`（包含 `identity` 启动标识），空列表/失败独立处理 | [✅ 已实现] |
+| `/api/v1/ssh/processes/{host_alias}/kill` | `POST` | JSON `{pid, signal: "SIGTERM" 或 "SIGKILL", identity, sudo: false}`，PID ≥ 2，核对启动身份并发送信号，显式 sudo，无自动提权；发送成功不等同退出 | [✅ 已实现] |
 | `/api/v1/ssh/docker/{host_alias}/containers/{container}` | `DELETE` | 删除指定 Docker 容器（带名称正则校验） | [✅ 已实现] |
 | `/api/v1/ssh/docker/{host_alias}/containers/{container}/action` | `POST` | 启动/停止指定容器，JSON `{action: "start" 或 "stop", sudo: false}`；参数白名单校验，经 SSH 执行真实命令，无自动提权回退 | [✅ 已实现] |
 | `/api/v1/ssh/docker/{host_alias}/containers/{container}/restart` | `POST` | 重启指定容器，JSON `{sudo: false}`；名称/ID 校验，无自动提权回退，返回真实命令结果 | [✅ 已实现] |

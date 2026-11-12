@@ -111,19 +111,29 @@ export interface DiskUsageItem {
   percent: number
 }
 
+export type ProcessSignal = 'SIGTERM' | 'SIGKILL'
+
+export interface ProcessActionResponse {
+  status: 'ok' | 'error'
+  message?: string
+  detail?: string | { msg: string }[]
+  error_type?: string
+}
+
 export interface ProcessItem {
   pid: number
   ppid: number
   name: string
   cmdline: string
   user: string
-  state: 'R' | 'S' | 'D' | 'Z'
+  state: string
+  identity?: string
   cpuPercent: number
   memPercent: number
   memRssMb: number
   listenPort?: number
   protocol?: 'tcp' | 'udp'
-  firewallAllowed?: boolean
+  firewallAllowed?: boolean | null
   cwd: string
   systemdUnit?: string
   dockerContainerId?: string
@@ -184,23 +194,44 @@ export interface DockerContainerItem {
   name: string
   image: string
   status: 'running' | 'exited' | 'restarting' | 'created' | 'paused' | 'removing' | 'dead' | 'unknown'
-  cpuPercent: number
-  memMb: number
+  cpuPercent: number | null
+  memMb: number | null
   ports: Array<{
+    /** 0 表示仅容器内暴露，未发布至宿主机。 */
     hostPort: number
+    hostIp?: string
     containerPort: number
-    protocol: 'tcp' | 'udp'
-    firewallAllowed: boolean
+    protocol: 'tcp' | 'udp' | 'sctp'
+    firewallAllowed: boolean | null
   }>
   volumes: Array<{
     hostPath: string
     containerPath: string
-    type?: 'bind' | 'volume'
+    type?: string
+    readOnly?: boolean
   }>
   diskUsage?: string
-  composeProject?: string
+  composeProject?: string | null
+  composeService?: string | null
   composePath?: string
   createdAt: string
+  detailsAvailable?: boolean
+  networkMode?: string | null
+  networks?: Array<{ name: string; ipAddress: string; ipv6Address: string }>
+  restartPolicy?: string | null
+  restartMaxRetries?: number | null
+  restartCount?: number | null
+  healthStatus?: string | null
+  startedAt?: string | null
+  finishedAt?: string | null
+  exitCode?: number | null
+  oomKilled?: boolean | null
+  memoryLimitBytes?: number | null
+  cpuLimit?: number | null
+  cpusetCpus?: string | null
+  privileged?: boolean | null
+  readOnlyRootfs?: boolean | null
+  runUser?: string | null
 }
 
 export interface FirewallRuleItem {

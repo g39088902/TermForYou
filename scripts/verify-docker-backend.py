@@ -1,5 +1,7 @@
 """Run: backend/.venv/bin/python scripts/verify-docker-backend.py"""
 import asyncio
+import json
+import shlex
 import sys
 import unittest
 from pathlib import Path
@@ -7,9 +9,96 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from models import TerminalAuthPayload, DockerActionPayload
-from metrics_collector import HostMetricsService, docker_exec_command
+from models import TerminalAuthPayload, DockerActionPayload, DockerContainerInfo
+from metrics_collector import HostMetricsService, docker_exec_command, REMOTE_FULL_INSPECT_SCRIPT
 from pydantic import ValidationError
+
+
+class DockerInspectionChecks(unittest.TestCase):
+    """Exercise the actual remote Python parser with representative Docker output."""
+    cid = "a" * 64
+
+    def inspect(self, details, ports="127.0.0.1:8080->80/tcp, 443/tcp"):
+        commands = []
+        def run_cmd(command, timeout=3):
+            commands.append(command)
+            if command[1] == "ps":
+                return f"{self.cid}|web|nginx:alpine|Up 2 hours|running|{ports}|2026-11-11 00:00:00 +0000 UTC|0B"
+            return details
+        code = shlex.split(REMOTE_FULL_INSPECT_SCRIPT)[2]
+        # Validate shell quoting and the complete remote program, then execute Docker collection only.
+        compile(code, "remote", "exec")
+        docker_code = code[code.index("# 2. Docker"):code.index("# 3. Systemd")]
+        namespace = {"shutil": SimpleNamespace(which=lambda _: True), "json": json, "run_cmd": run_cmd, "data": {}}
+        exec(docker_code, namespace)
+        items = namespace["data"]["dockerContainers"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(len(commands), 2, "One ps and one batched inspect; no per-container calls")
+        self.assertNotIn('"Env"', commands[1][3])
+        self.assertNotIn('"Cmd"', commands[1][3])
+        self.assertNotIn('{{json (index . "Config" "Labels")}}', commands[1][3])
+        return DockerContainerInfo(**items[0]).model_dump()
+
+    def detail(self, mode="bridge", nano=500000000, quota=0, health="healthy"):
+        return json.dumps([
+            self.cid, "2026-11-11T00:00:00Z", "2026-11-11T01:00:00Z", "0001-01-01T00:00:00Z",
+            0, False, 2, mode, {"Name": "on-failure", "MaximumRetryCount": 3},
+            67108864, nano, quota, 100000, "0-1", False, True, "1000:1000",
+            [{"Source": "/data/a:b;c", "Destination": "/data", "Type": "bind", "RW": False},
+             {"Source": "", "Destination": "/tmp", "Type": "tmpfs", "RW": True}],
+            {"app-net": {"IPAddress": "172.20.0.2", "GlobalIPv6Address": "fd00::2"}},
+            {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}, {"HostIp": "::1", "HostPort": "8080"}], "443/tcp": None},
+            {"80/tcp": {}, "443/tcp": {}, "53/udp": {}, "5000/sctp": {}},
+            "app", "web", {}, {}, health
+        ])
+
+    def test_operational_details_and_port_semantics(self):
+        c = self.inspect(self.detail())
+        self.assertTrue(c["detailsAvailable"])
+        self.assertEqual((c["networkMode"], c["restartPolicy"], c["restartMaxRetries"]), ("bridge", "on-failure", 3))
+        self.assertEqual((c["cpuLimit"], c["memoryLimitBytes"]), (0.5, 67108864))
+        self.assertEqual(c["networks"][0]["ipv6Address"], "fd00::2")
+        self.assertEqual(c["volumes"][0]["hostPath"], "/data/a:b;c")
+        self.assertTrue(c["volumes"][0]["readOnly"])
+        self.assertEqual(c["volumes"][1]["type"], "tmpfs")
+        self.assertEqual((c["runUser"], c["readOnlyRootfs"], c["healthStatus"]), ("1000:1000", True, "healthy"))
+        self.assertEqual((c["composeProject"], c["composeService"]), ("app", "web"))
+        self.assertEqual(len(c["ports"]), 5)
+        self.assertEqual({p["hostIp"] for p in c["ports"] if p["hostPort"]}, {"127.0.0.1", "::1"})
+        self.assertTrue(all(p["hostPort"] == 0 for p in c["ports"] if p["containerPort"] != 80))
+        self.assertTrue(all(p["firewallAllowed"] is None for p in c["ports"]))
+        self.assertIsNone(c["cpuPercent"], "Never report placeholder utilization")
+
+    def test_host_none_quota_and_no_healthcheck(self):
+        for mode in ["host", "none", "container:abc"]:
+            c = self.inspect(self.detail(mode=mode, nano=0, quota=25000, health=None))
+            self.assertEqual(c["networkMode"], mode)
+            self.assertEqual(c["cpuLimit"], 0.25)
+            self.assertIsNone(c["healthStatus"])
+        self.assertEqual(self.inspect(self.detail(nano=0))["cpuLimit"], 0)
+
+    def test_missing_details_preserve_list_and_unknowns(self):
+        for detail in ["", "not-json", "[]"]:
+            c = self.inspect(detail)
+            self.assertFalse(c["detailsAvailable"])
+            self.assertIsNone(c["networkMode"])
+            self.assertIsNone(c["memoryLimitBytes"], "Unknown is different from unlimited")
+            self.assertIsNone(c["privileged"], "Unknown is different from disabled")
+            self.assertEqual([(p["hostPort"], p["containerPort"]) for p in c["ports"]], [(8080, 80), (0, 443)])
+
+    def test_stopped_container_preserves_configured_ports(self):
+        detail = json.loads(self.detail())
+        detail[19] = None  # NetworkSettings.Ports is absent before Docker creates the network.
+        detail[23] = {"80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}]}
+        c = self.inspect(json.dumps(detail))
+        published = [p for p in c["ports"] if p["hostPort"]]
+        self.assertEqual([(p["hostIp"], p["hostPort"]) for p in published], [("127.0.0.1", 8080)])
+
+    def test_tmpfs_not_listed_in_mounts(self):
+        detail = json.loads(self.detail())
+        detail[24] = {"/cache": "ro,size=1048576"}
+        c = self.inspect(json.dumps(detail))
+        self.assertIn({"hostPath": "", "containerPath": "/cache", "type": "tmpfs", "readOnly": True}, c["volumes"])
 
 
 class DockerBackendChecks(unittest.IsolatedAsyncioTestCase):
