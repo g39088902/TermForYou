@@ -97,7 +97,7 @@ function getTagClass(tag: string, host: ServerHost) {
 async function handleDeleteHost(hostId: string, hostName: string) {
   if (
     !confirm(
-      `确定要彻底持久删除服务器「${hostName}」的配置吗？\n\n注意：此操作将直接同步修改本地 ~/.ssh/config 移除该 Host 块，并永久清理 SQLite 连接统计历史，此过程不可逆。`
+      `确定要彻底持久删除服务器「${hostName}」的配置吗？\n\n注意：此操作将直接同步修改本地 ~/.ssh/config 移除该 Host 块，并清理本地连接统计历史，此过程不可逆。`
     )
   ) {
     return
@@ -367,7 +367,7 @@ onMounted(() => {
               <button
                 type="button"
                 @click.stop="handleDeleteHost(host.id, host.name)"
-                title="持久删除此服务器配置 (从 ~/.ssh/config 与 SQLite 中彻底移除)"
+                title="持久删除此服务器配置 (从 ~/.ssh/config 与本地统计中彻底移除)"
                 class="opacity-40 group-hover:opacity-100 hover:opacity-100 p-1.5 rounded-md text-slate-400 hover:text-rose-400 hover:bg-rose-500/15 transition cursor-pointer border border-transparent hover:border-rose-500/30"
               >
                 <Trash2 class="w-3.5 h-3.5" />
@@ -378,7 +378,7 @@ onMounted(() => {
 
           <!-- 标签组 -->
           <div class="flex items-center gap-1.5 flex-wrap">
-            <!-- 用户手动连接频次徽章 (基于 SQLite 持久化) -->
+            <!-- 用户手动连接频次徽章 (基于浏览器 LocalStorage 持久化) -->
             <span
               :class="[
                 'px-2 py-0.5 text-[10px] rounded-full flex items-center gap-1 font-mono',

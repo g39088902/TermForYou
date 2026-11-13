@@ -41,15 +41,10 @@ from ssh_config_parser import (
     add_host_to_ssh_config,
 )
 from metrics_collector import metrics_service, docker_exec_command
-from db import init_db, get_all_host_stats, record_manual_connection, delete_host_stat
 from probe_service import probe_single_host, probe_all_hosts_concurrently
 
 app = FastAPI(title="TermForYou SSH Backend", version="1.0.0")
 logger = logging.getLogger(__name__)
-
-@app.on_event("startup")
-def on_startup():
-    init_db()
 
 # 允许前端开发服务跨域
 app.add_middleware(
@@ -62,29 +57,8 @@ app.add_middleware(
 
 @app.get("/api/v1/ssh/hosts", response_model=list[SshHostInfo])
 async def list_ssh_hosts():
-    """读取本地 ~/.ssh/config 并返回按用户手动连接次数降序排列的服务器列表"""
-    hosts = parse_ssh_config()
-    stats = get_all_host_stats()
-    for h in hosts:
-        host_stat = stats.get(h.host_alias, {})
-        h.connection_count = host_stat.get("connection_count", 0)
-        h.last_connected_at = host_stat.get("last_connected_at", None)
-
-    # 按用户手动连接次数降序排序 (若次数相同按最近连接时间降序)
-    hosts.sort(
-        key=lambda h: (h.connection_count, h.last_connected_at or 0),
-        reverse=True
-    )
-    return hosts
-
-@app.post("/api/v1/ssh/hosts/{host_alias}/connect")
-async def record_host_connect(host_alias: str):
-    """记录用户手动连接服务器事件，SQLite 中累加连接计数并更新时间戳"""
-    stat = record_manual_connection(host_alias)
-    return {
-        "status": "ok",
-        "stat": stat
-    }
+    """读取本地 ~/.ssh/config 并返回服务器列表"""
+    return parse_ssh_config()
 
 @app.post("/api/v1/ssh/hosts")
 async def create_ssh_host(payload: CreateHostPayload):
@@ -106,11 +80,9 @@ async def delete_ssh_host(host_alias: str):
     """
     持久删除指定服务器配置：
     1. 从 ~/.ssh/config 中彻底移除 Host 块 (自动备份 ~/.ssh/config.bak)
-    2. 从 SQLite host_stats 中清理连接历史与频次
-    3. 清理内存连接缓存
+    2. 清理内存连接缓存
     """
     deleted_from_config = delete_host_from_ssh_config(host_alias)
-    deleted_from_db = delete_host_stat(host_alias)
 
     # 清理 metrics 缓存和已建连接
     if host_alias in metrics_service._connections:
@@ -125,8 +97,7 @@ async def delete_ssh_host(host_alias: str):
         "status": "ok",
         "host_alias": host_alias,
         "deleted_from_config": deleted_from_config,
-        "deleted_from_db": deleted_from_db,
-        "message": f"主机「{host_alias}」配置与统计数据已彻底持久删除"
+        "message": f"主机「{host_alias}」配置已彻底持久删除"
     }
 
 @app.post("/api/v1/ssh/probe/{host_alias}")
@@ -561,12 +532,6 @@ async def terminal_websocket(websocket: WebSocket, host_alias: str):
 
     try:
         async with asyncssh.connect(**conn_kwargs) as conn:
-            # 成功建立 SSH 会话，记录一次手动连接并持久化到 SQLite
-            try:
-                record_manual_connection(host_alias)
-            except Exception:
-                pass
-
             await websocket.send_text(json.dumps({
                 "action": "stdout",
                 "payload": f"\x1b[32mSSH 会话连接成功 (PTY {cols}x{rows})\x1b[0m\r\n\r\n"

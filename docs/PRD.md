@@ -10,19 +10,16 @@
 ### 1.1 产品形态
 - **架构模式**：采用现代轻量级前后端解耦的**免 Agent (Agentless)** 架构。
   - **前端**：Vue 3 (Composition API) + Tailwind CSS v4 + TypeScript + `@xterm/xterm`（状态管理使用全局 `reactive` 单例，未引入 Pinia）。
-  - **后端**：Python 3.10+ FastAPI + `asyncssh` + SQLite（标准库 `sqlite3` 仅存主机连接次数与最后连接时间等非敏感统计）。
+  - **后端**：Python 3.10+ FastAPI + `asyncssh`（无数据库，仅内存流转临时凭据与连接会话，磁盘仅读写 `~/.ssh/config`；主机连接次数等统计存于浏览器 LocalStorage）。
   - **通讯**：WebSocket (PTY 交互流) + HTTP REST (配置感知、巡检指标、临时凭据、文件与容器操作)。
 - **零 Agent 侵入**：目标 Linux 服务器无需安装任何常驻后台守护进程，通过标准 SSH 协议直连，利用远端 `python3` 脚本与批量命令解析器将 `systemctl`、`crontab`、`docker`、`ufw/iptables`、`ss/proc` 与文件系统转化为可视化界面。
 
 ### 1.2 核心设计哲学
-1. **严格零凭据持久化存储 (Zero-Storage Security)**：
-   - 严禁在数据库、本地文件、环境变量或前端 LocalStorage 中持久化存储主机密码或私钥。
-   - 密码仅作为**内存临时凭据**在后端生命周期或当前会话流转，刷新页面或重启后端即刻蒸发。
-2. **原生 SSH 配置感知与双向透明同步 (Native SSH First)**：
+1. **原生 SSH 配置感知与双向透明同步 (Native SSH First)**：
    - 直接以宿主机 `~/.ssh/config` 为唯一数据源，新增或修改主机直接写回原文件（严格遵循 `User` 在 `HostName` 之前的语法规范），与原生命令行及三方开发者工具保持 100% 互通。
-3. **静默生效与无打扰原则 (Silent Quality)**：
+2. **静默生效与无打扰原则 (Silent Quality)**：
    - 底层修复（如视口截断、浮点行高补偿、网络重连）静默生效，严禁在 UI 向用户展示自嗨式 Bug 修复告知条。
-4. **拒绝冗余输入，聚焦终端与 AI Copilot (No Redundant CLI Inputs)**：
+3. **拒绝冗余输入，聚焦终端与 AI Copilot (No Redundant CLI Inputs)**：
    - 用户在黑屏终端中敲击命令是最直接的交互习惯；终端外部严禁设计重复敲原生命令的独立输入框。
    - 外部辅助框唯一定位为**自然语言 AI Copilot**，承担“自然语言意图 → 运维命令生成 → 确认一键执行”的增量价值。
 
@@ -47,11 +44,10 @@
 | 功能点 | 详细需求说明 | 优先级 | 落地状态 |
 | :--- | :--- | :--- | :--- |
 | **自然语言意图输入底座** | 终端综合工作台底部专设 AI Copilot 操控条，支持自然语言提问（如“排查占用 80 端口的进程”、“清理无用 Docker 镜像”）。 | P0 | [✅ 已实现] |
-| **高频 Prompt 快捷胶囊** | 提供高频运维场景一键填词（查内存最高进程、排查特定端口、查找大文件、Docker 缓存清理、最近失败服务）。 | P0 | [✅ 已实现] |
-| **AI 建议指令卡片与一键执行** | 生成命令后展示包含命令释义、参数解释的建议卡片，支持直接一键【在终端执行】（通过 WebSocket 注入真实终端）。 | P0 | [✅ 已实现] |
-| **真实 LLM 后端模型对接** | 后端对接 OpenAI 兼容协议（DeepSeek / Ollama / Gemini 等），替代目前的前端启发式推导。 | P1 | [⏳ 进行中] |
+| **AI 建议指令卡片与一键执行** | 生成命令后展示包含命令释义的建议卡片，支持直接一键【在终端执行】（通过 WebSocket 注入真实终端）。 | P0 | [✅ 已实现] |
+| **DeepSeek 模型对接与浏览器本地密钥** | 未设置 Key 时提供按钮弹窗录入 DeepSeek API Key（仅保存在浏览器 LocalStorage，不进后端），由前端直接调用 `deepseek-flash`（关闭思考 + JSON 格式输出）并解析命令与说明。 | P1 | [✅ 已实现] |
 
-### 2.3 主机感知与零凭据认证体系 (SSH Host Management)
+### 2.3 主机感知与认证体系 (SSH Host Management)
 | 功能点 | 详细需求说明 | 优先级 | 落地状态 |
 | :--- | :--- | :--- | :--- |
 | **`~/.ssh/config` 双向解析与持久化** | 自动读取本地配置，提取 Host、User、HostName、Port、IdentityFile；新增主机规范化写回文件（严格保证 `User` 在 `HostName` 之前）。 | P0 | [✅ 已实现] |
@@ -155,14 +151,14 @@
 - [x] 原生 `~/.ssh/config` 双向解析与规整持久化。
 - [x] 基于 xterm.js 的真实 WebSocket PTY 终端通信与 ANSI 渲染。
 - [x] 终端自适应尺寸解算与末行防截断数学安全边界保护。
-- [x] 智能认证方式推导（特定密钥/默认密钥/密码认证）与零持久化内存密码流。
+- [x] 智能认证方式推导（特定密钥/默认密钥/密码认证）与内存临时密码流。
 - [x] 单会话批量全量指令巡检（CPU、内存、进程、Docker、Systemd、防火墙、Crontab、文件管理）。
 - [x] 自然语言 AI Copilot 命令输入底座与建议卡片展开。
 - [x] WCAG AAA 浅色/深色双主题高对比度适配。
 
 ### 阶段二：AI Copilot 深度赋能与智能参数化 [进行中]
-- [ ] 后端接入真实大模型接口（支持配置 OpenAI / DeepSeek / 本地 Ollama 模型）。
-- [ ] 结合当前主机的 OS 类型（Ubuntu/CentOS/Alpine）为 Copilot 注入系统上下文，生成更加精准的命令。
+- [x] 前端直连大模型接口（已对接 DeepSeek `deepseek-flash`，关闭思考、JSON 结构化输出，Key 仅存浏览器 LocalStorage，不进后端）。
+- [x] 结合当前主机的 OS 类型（Ubuntu/CentOS/Alpine）与当前目录为 Copilot 注入系统上下文，生成更加精准的命令。
 - [ ] 历史命令后端自动归档挖掘与模板化推荐引擎。
 
 ### 阶段三：安全加固与高级交互能力 [规划中]

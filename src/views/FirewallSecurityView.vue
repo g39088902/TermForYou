@@ -16,7 +16,6 @@ import {
   ShieldAlert,
   Lock,
   Plus,
-  Star,
   Activity,
   Container,
   RefreshCw,
@@ -168,21 +167,6 @@ async function confirmDeleteRule() {
   if (ok) {
     closeDeleteDialog()
   }
-}
-
-function saveFirewallRuleToSnippets() {
-  store.savedSnippets.unshift({
-    id: `snip-fw-${Date.now()}`,
-    title: `防火墙放行端口 ${newRule.value.port} (${newRule.value.comment})`,
-    category: '网络与端口排查',
-    commandTemplate: underlyingCliPreview.value,
-    description: '防火墙放行规则',
-    variables: [],
-    scope: currentHost.value.id,
-    usageCount: 1,
-    source: 'gui-saved'
-  })
-  showToast('已将该命令保存至常用命令库！')
 }
 </script>
 
@@ -390,15 +374,6 @@ function saveFirewallRuleToSnippets() {
         </div>
 
         <div class="flex items-center gap-2 shrink-0">
-          <button
-            type="button"
-            @click="saveFirewallRuleToSnippets"
-            class="flex items-center gap-1 px-2.5 py-1 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 text-xs cursor-pointer"
-          >
-            <Star class="w-3.5 h-3.5" />
-            <span>存为常用命令</span>
-          </button>
-
           <button
             type="button"
             :disabled="store.firewallMutating || !currentHost.id"

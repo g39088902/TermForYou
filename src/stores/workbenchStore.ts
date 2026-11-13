@@ -101,198 +101,10 @@ export const store = reactive({
   shellHistoryError: '',
 
   // 常用命令库 (Snippets)
-  savedSnippets: [
-    {
-      id: 'snip-1',
-      title: '实时追踪容器尾部日志',
-      category: 'Docker 运维',
-      commandTemplate: 'docker logs -f --tail {{lines:100}} {{container_name:nginx-gateway}}',
-      description: '按指定行数实时流式查看指定容器的 stdout/stderr 日志',
-      variables: [
-        { name: 'lines', defaultValue: '100', description: '尾部显示行数', options: ['50', '100', '200', '500'] },
-        {
-          name: 'container_name',
-          defaultValue: 'nginx-gateway',
-          description: '目标 Docker 容器名称',
-          options: ['nginx-gateway', 'api-core-prod', 'redis-cache-01', 'postgres-exporter']
-        }
-      ],
-      scope: 'global',
-      usageCount: 42,
-      source: 'auto-extracted'
-    },
-    {
-      id: 'snip-2',
-      title: '反查指定端口占用的进程与 PID',
-      category: '网络与端口排查',
-      commandTemplate: 'ss -tulnp | grep :{{port:8080}}',
-      description: '快速定位监听特定 TCP/UDP 端口的进程名与 PID',
-      variables: [
-        { name: 'port', defaultValue: '8080', description: '要排查的端口号', options: ['80', '443', '3306', '6379', '8080'] }
-      ],
-      scope: 'global',
-      usageCount: 31,
-      source: 'manual'
-    },
-    {
-      id: 'snip-3',
-      title: '查找大文件并按大小降序排列',
-      category: '日志与文件分析',
-      commandTemplate: 'find {{target_dir:/var/log}} -type f -size +{{min_size:50M}} -exec ls -lh {} + | sort -k 5 -rh',
-      description: '磁盘告警时快速定位指定目录下超过阈值的大文件',
-      variables: [
-        { name: 'target_dir', defaultValue: '/var/log', description: '扫描起始目录', options: ['/var/log', '/opt', '/var/lib/docker'] },
-        { name: 'min_size', defaultValue: '50M', description: '最小文件体积', options: ['10M', '50M', '100M', '500M'] }
-      ],
-      scope: 'global',
-      usageCount: 19,
-      source: 'manual'
-    },
-    {
-      id: 'snip-4',
-      title: 'UFW 放行指定内网网段访问端口',
-      category: '网络与端口排查',
-      commandTemplate: 'sudo ufw allow from {{ip_cidr:10.16.0.0/16}} to any port {{port:5432}} proto tcp comment "{{comment:Internal DB}}"',
-      description: '由防火墙可视化向导保存的白名单放行指令',
-      variables: [
-        { name: 'ip_cidr', defaultValue: '10.16.0.0/16', description: '允许的来源 IP 或 CIDR 网段' },
-        { name: 'port', defaultValue: '5432', description: '放行端口' },
-        { name: 'comment', defaultValue: 'Internal DB', description: '规则备注' }
-      ],
-      scope: 'prod-web-01',
-      usageCount: 12,
-      source: 'gui-saved'
-    }
-  ] as SavedSnippet[],
+  savedSnippets: [] as SavedSnippet[],
 
-  // 文件系统模拟数据
-  files: [
-    {
-      name: 'nginx.conf',
-      path: '/etc/nginx/nginx.conf',
-      isDir: false,
-      sizeBytes: 2641,
-      permissions: '-rw-r--r--',
-      octal: '0644',
-      owner: 'root',
-      group: 'root',
-      modifiedAt: '2026-11-09 18:12',
-      content: `user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-
-events {
-    worker_connections 4096;
-    multi_accept on;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    keepalive_timeout 65;
-    include /etc/nginx/mime.types;
-
-    upstream api_backend {
-        server 127.0.0.1:8080 max_fails=3 fail_timeout=10s;
-    }
-
-    server {
-        listen 80;
-        server_name termforyou.internal;
-        location / {
-            proxy_pass http://api_backend;
-        }
-    }
-}`
-    },
-    {
-      name: 'conf.d',
-      path: '/etc/nginx/conf.d',
-      isDir: true,
-      sizeBytes: 4096,
-      permissions: 'drwxr-xr-x',
-      octal: '0755',
-      owner: 'root',
-      group: 'root',
-      modifiedAt: '2026-11-10 09:20'
-    },
-    {
-      name: 'docker-compose.yml',
-      path: '/opt/stacks/gateway/docker-compose.yml',
-      isDir: false,
-      sizeBytes: 1820,
-      permissions: '-rw-r--r--',
-      octal: '0644',
-      owner: 'root',
-      group: 'docker',
-      modifiedAt: '2026-11-08 14:30',
-      content: `services:
-  nginx-gateway:
-    image: nginx:1.27-alpine
-    container_name: nginx-gateway
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /etc/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-      - /var/log/nginx:/var/log/nginx
-
-  redis-cache-01:
-    image: redis:7.4-alpine
-    container_name: redis-cache-01
-    restart: always
-    ports:
-      - "6379:6379"
-    volumes:
-      - /var/lib/docker/volumes/redis_data/_data:/data`
-    },
-    {
-      name: 'backup_db.sh',
-      path: '/opt/scripts/backup_db.sh',
-      isDir: false,
-      sizeBytes: 940,
-      permissions: '-rwxr-xr-x',
-      octal: '0755',
-      owner: 'root',
-      group: 'root',
-      modifiedAt: '2026-11-07 02:00',
-      content: `#!/usr/bin/env bash
-set -euo pipefail
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-BACKUP_DIR="/var/backups/postgres"
-mkdir -p "$BACKUP_DIR"
-pg_dump -U postgres -h 127.0.0.1 app_prod | gzip > "$BACKUP_DIR/app_prod_$TIMESTAMP.sql.gz"
-find "$BACKUP_DIR" -type f -name "*.sql.gz" -mtime +7 -delete
-echo "[OK] Backup finished at $TIMESTAMP"`
-    },
-    {
-      name: 'api-core.service',
-      path: '/etc/systemd/system/api-core.service',
-      isDir: false,
-      sizeBytes: 612,
-      permissions: '-rw-r--r--',
-      octal: '0644',
-      owner: 'root',
-      group: 'root',
-      modifiedAt: '2026-11-05 16:40',
-      content: `[Unit]
-Description=TermForYou Core API Service
-After=network.target
-
-[Service]
-Type=simple
-User=www-data
-WorkingDirectory=/opt/api-core
-ExecStart=/opt/api-core/bin/server --port 8080 --env prod
-Restart=always
-RestartSec=5
-LimitNOFILE=65535
-
-[Install]
-WantedBy=multi-user.target`
-    }
-  ] as FileEntry[],
+  // 远程文件列表（初始为空，从远端主机 SFTP/SSH 实时拉取）
+  files: [] as FileEntry[],
 
   // Only actual process snapshots may be used as signal targets.
   processes: [] as ProcessItem[],
@@ -405,38 +217,62 @@ export interface BackendSshHost {
   identity_files: string[]
   proxy_jump?: string | null
   auth_hint: string
-  connection_count?: number
-  last_connected_at?: number | null
 }
 
-// 用户手动连接某台服务器：持久化至 SQLite 数据库并按连接次数降序重排
-export async function connectHost(hostId: string) {
-  const host = store.hosts.find((h) => h.id === hostId)
-  if (!host) return
+const HOST_STATS_STORAGE_KEY = 'termforyou_host_stats'
 
-  // 1. 发起后端记录连接次数请求
+interface LocalHostStat {
+  connectionCount: number
+  lastConnectedAt?: number
+}
+
+function loadHostStatsMap(): Record<string, LocalHostStat> {
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/hosts/${encodeURIComponent(hostId)}/connect`, {
-      method: 'POST'
-    })
-    if (res.ok) {
-      const data = await res.json()
-      if (data.stat) {
-        host.connectionCount = data.stat.connection_count
-        host.lastConnectedAt = data.stat.last_connected_at
-      }
-    }
+    const raw = localStorage.getItem(HOST_STATS_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
   } catch {
-    host.connectionCount = (host.connectionCount || 0) + 1
-    host.lastConnectedAt = Math.floor(Date.now() / 1000)
+    return {}
   }
+}
 
-  // 2. 重新按用户手动连接的次数降序排序 (若次数相同按最后连接时间降序)
+function saveHostStatsMap(stats: Record<string, LocalHostStat>) {
+  try {
+    localStorage.setItem(HOST_STATS_STORAGE_KEY, JSON.stringify(stats))
+  } catch {
+    // 忽略浏览器存储异常
+  }
+}
+
+function sortHostsByStats() {
   store.hosts.sort((a, b) => {
     const countDiff = (b.connectionCount ?? 0) - (a.connectionCount ?? 0)
     if (countDiff !== 0) return countDiff
     return (b.lastConnectedAt ?? 0) - (a.lastConnectedAt ?? 0)
   })
+}
+
+// 用户手动连接某台服务器：记录至浏览器 LocalStorage 并按连接次数降序重排
+export async function connectHost(hostId: string) {
+  const host = store.hosts.find((h) => h.id === hostId)
+  if (!host) return
+
+  // 1. 记录连接次数与最后连接时间到浏览器 LocalStorage
+  const nextCount = (host.connectionCount || 0) + 1
+  const nowTs = Math.floor(Date.now() / 1000)
+  host.connectionCount = nextCount
+  host.lastConnectedAt = nowTs
+
+  const stats = loadHostStatsMap()
+  stats[hostId] = {
+    connectionCount: nextCount,
+    lastConnectedAt: nowTs
+  }
+  saveHostStatsMap(stats)
+
+  // 2. 重新按用户手动连接的次数降序排序 (若次数相同按最后连接时间降序)
+  sortHostsByStats()
 
   // 3. 打开会话标签并切换至终端工作台
   if (!store.openHostIds.includes(hostId)) {
@@ -498,21 +334,26 @@ export async function loadSshHostsFromBackend() {
     if (!res.ok) return
     const backendHosts: BackendSshHost[] = await res.json()
     if (backendHosts && backendHosts.length > 0) {
-      store.hosts = backendHosts.map((h) => ({
-        id: h.host_alias,
-        name: h.host_alias,
-        ip: h.hostname,
-        port: h.port,
-        user: h.user,
-        group: '~/.ssh/config 本地配置',
-        status: 'unconnected',
-        identityFiles: h.identity_files,
-        tags: h.identity_files.length > 0 ? ['密钥认证', ...h.identity_files.map(k => k.split('/').pop() || 'key')] : ['免密/密码认证'],
-        connectionCount: h.connection_count ?? 0,
-        lastConnectedAt: h.last_connected_at ?? undefined,
-        metricsStatus: 'idle',
-        powerStatus: 'unknown'
-      }))
+      const stats = loadHostStatsMap()
+      store.hosts = backendHosts.map((h) => {
+        const localStat = stats[h.host_alias]
+        return {
+          id: h.host_alias,
+          name: h.host_alias,
+          ip: h.hostname,
+          port: h.port,
+          user: h.user,
+          group: '~/.ssh/config 本地配置',
+          status: 'unconnected',
+          identityFiles: h.identity_files,
+          tags: h.identity_files.length > 0 ? ['密钥认证', ...h.identity_files.map(k => k.split('/').pop() || 'key')] : ['免密/密码认证'],
+          connectionCount: localStat?.connectionCount ?? 0,
+          lastConnectedAt: localStat?.lastConnectedAt,
+          metricsStatus: 'idle',
+          powerStatus: 'unknown'
+        }
+      })
+      sortHostsByStats()
       // 首次加载成功后，自动执行一次全部服务器开机与连通性探测
       probeAllHosts(true)
     }
@@ -521,7 +362,7 @@ export async function loadSshHostsFromBackend() {
   }
 }
 
-// 持久彻底删除某台服务器配置 (从 ~/.ssh/config 与 SQLite 中同时移除)
+// 持久彻底删除某台服务器配置 (从 ~/.ssh/config 与浏览器 LocalStorage 统计中同时移除)
 export async function deleteHostPermanently(hostId: string): Promise<boolean> {
   const host = store.hosts.find((h) => h.id === hostId)
   const hostName = host?.name || hostId
@@ -540,8 +381,13 @@ export async function deleteHostPermanently(hostId: string): Promise<boolean> {
     return false
   }
 
-  // 1. 从前端主机池移除
+  // 1. 从前端主机池与浏览器 LocalStorage 统计中移除
   store.hosts = store.hosts.filter((h) => h.id !== hostId)
+  const stats = loadHostStatsMap()
+  if (hostId in stats) {
+    delete stats[hostId]
+    saveHostStatsMap(stats)
+  }
 
   // 2. 清理顶栏已打开的会话标签
   store.openHostIds = store.openHostIds.filter((id) => id !== hostId)
