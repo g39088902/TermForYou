@@ -16,6 +16,7 @@ from models import (
     SystemdActionPayload,
     FirewallRuleCreatePayload,
     FirewallRuleDeletePayload,
+    ShellHistoryResponse,
     CronTaskCreatePayload,
     CronTaskEnabledPayload,
     ProcessSignalPayload,
@@ -483,6 +484,14 @@ async def delete_firewall_rule_endpoint(host_alias: str, payload: FirewallRuleDe
     if not find_host_by_alias(host_alias):
         raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
     return await metrics_service.delete_firewall_rule(host_alias, payload)
+
+
+@app.get("/api/v1/ssh/history/{host_alias}", response_model=ShellHistoryResponse)
+async def get_shell_history_endpoint(host_alias: str):
+    """采集目标主机的真实 Shell 历史命令列表，供高频命令前缀分布与模板提炼使用。"""
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.fetch_shell_history(host_alias)
 
 
 @app.websocket("/ws/terminal/{host_alias}")

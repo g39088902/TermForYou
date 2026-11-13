@@ -28,6 +28,8 @@ export interface ServerHost {
   cpuCores?: number[]
   loadAvg?: [number, number, number]
   memUsedGb?: number
+  memAppGb?: number
+  memCacheGb?: number
   memTotalGb?: number
   swapUsedGb?: number
   swapTotalGb?: number
@@ -308,4 +310,18 @@ export interface CrossModuleLinkPayload {
   prefillFirewallComment?: string
   filterService?: string
   filterContainer?: string
+}
+
+export interface CommandPrefixStat {
+  prefix: string
+  count: number
+  percent: number
+}
+
+export interface ShellHistoryResponse {
+  status: 'ok' | 'auth_failed' | 'error'
+  host_alias: string
+  shellHistory: string[]
+  shellHistorySource: string
+  message?: string
 }

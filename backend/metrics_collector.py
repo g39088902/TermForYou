@@ -30,11 +30,14 @@ try:
             if len(p) == 2:
                 mem[p[0].strip()] = int(p[1].strip().split()[0])
     mem_total_kb = mem.get("MemTotal", 0)
-    mem_avail_kb = mem.get("MemAvailable", mem.get("MemFree", 0))
-    mem_used_kb = mem_total_kb - mem_avail_kb
+    mem_free_kb = mem.get("MemFree", 0)
+    mem_avail_kb = mem.get("MemAvailable", mem_free_kb)
+    mem_used_kb = max(0, mem_total_kb - mem_avail_kb)
+    mem_cache_kb = mem.get("Buffers", 0) + mem.get("Cached", 0) + mem.get("SReclaimable", 0)
+    mem_app_kb = max(0, mem_total_kb - mem_free_kb - mem_cache_kb)
     swap_total_kb = mem.get("SwapTotal", 0)
     swap_free_kb = mem.get("SwapFree", 0)
-    swap_used_kb = swap_total_kb - swap_free_kb
+    swap_used_kb = max(0, swap_total_kb - swap_free_kb)
 
     st = os.statvfs("/")
     disk_total = st.f_blocks * st.f_frsize
@@ -143,6 +146,8 @@ try:
         "status": "ok",
         "load": load,
         "mem_used_mb": round(mem_used_kb / 1024, 1),
+        "mem_app_mb": round(mem_app_kb / 1024, 1),
+        "mem_cache_mb": round(mem_cache_kb / 1024, 1),
         "mem_total_mb": round(mem_total_kb / 1024, 1),
         "swap_used_mb": round(swap_used_kb / 1024, 1),
         "swap_total_mb": round(swap_total_kb / 1024, 1),
@@ -175,17 +180,23 @@ BEGIN {
     split(line, u); up_sec=int(u[1]);
   }
   close("/proc/uptime");
-  mt=0; ma=0; st=0; sf=0;
+  mt=0; mf=0; ma=0; mbuf=0; mcache=0; msrec=0; st=0; sf=0;
   while ((getline line < "/proc/meminfo") > 0) {
     if (line ~ /^MemTotal:/) { split(line, m); mt=m[2]+0; }
+    else if (line ~ /^MemFree:/) { split(line, m); mf=m[2]+0; }
     else if (line ~ /^MemAvailable:/) { split(line, m); ma=m[2]+0; }
+    else if (line ~ /^Buffers:/) { split(line, m); mbuf=m[2]+0; }
+    else if (line ~ /^Cached:/) { split(line, m); mcache=m[2]+0; }
+    else if (line ~ /^SReclaimable:/) { split(line, m); msrec=m[2]+0; }
     else if (line ~ /^SwapTotal:/) { split(line, m); st=m[2]+0; }
     else if (line ~ /^SwapFree:/) { split(line, m); sf=m[2]+0; }
   }
   close("/proc/meminfo");
-  if (ma == 0) ma = mt * 0.5;
-  mu = mt - ma;
-  su = st - sf;
+  if (ma == 0) ma = (mf > 0 ? mf + mbuf + mcache : mt * 0.5);
+  mu = mt - ma; if (mu < 0) mu = 0;
+  mc = mbuf + mcache + msrec;
+  mapp = mt - mf - mc; if (mapp < 0) mapp = 0;
+  su = st - sf; if (su < 0) su = 0;
   cidle=0; ctot=0;
   while ((getline line < "/proc/stat") > 0) {
     if (line ~ /^cpu /) {
@@ -220,12 +231,77 @@ BEGIN {
   d_used = (dfa[3]+0) / (1024*1024);
   d_pct = 0;
   if (d_tot > 0) d_pct = (d_used / d_tot) * 100;
-  printf "{\"status\":\"ok\",\"load\":[%f,%f,%f],\"uptime_sec\":%d,\"mem_used_mb\":%.1f,\"mem_total_mb\":%.1f,\"swap_used_mb\":%.1f,\"swap_total_mb\":%.1f,\"cpu_idle\":%d,\"cpu_total\":%d,\"cpu_cores\":[],\"rx_bytes\":%d,\"tx_bytes\":%d,\"disk_percent\":%.1f,\"disk_total_gb\":%.1f,\"disk_used_gb\":%.1f,\"disk_read_bytes\":%d,\"disk_write_bytes\":%d}\n",
-    l1, l5, l15, up_sec, (mu/1024), (mt/1024), (su/1024), (st/1024), cidle, ctot, rx, tx, d_pct, d_tot, d_used, drb, dwb;
+  printf "{\"status\":\"ok\",\"load\":[%f,%f,%f],\"uptime_sec\":%d,\"mem_used_mb\":%.1f,\"mem_app_mb\":%.1f,\"mem_cache_mb\":%.1f,\"mem_total_mb\":%.1f,\"swap_used_mb\":%.1f,\"swap_total_mb\":%.1f,\"cpu_idle\":%d,\"cpu_total\":%d,\"cpu_cores\":[],\"rx_bytes\":%d,\"tx_bytes\":%d,\"disk_percent\":%.1f,\"disk_total_gb\":%.1f,\"disk_used_gb\":%.1f,\"disk_read_bytes\":%d,\"disk_write_bytes\":%d}\n",
+    l1, l5, l15, up_sec, (mu/1024), (mapp/1024), (mc/1024), (mt/1024), (su/1024), (st/1024), cidle, ctot, rx, tx, d_pct, d_tot, d_used, drb, dwb;
 }'
 '''
 
-# 全量功能页面数据采集脚本 (进程、容器、服务、定时任务、防火墙规则、文件树)
+SHELL_HISTORY_CODE = r"""
+try:
+    import os as _os, re as _re
+    _hist_candidates = []
+    _env_hf = _os.environ.get('HISTFILE', '').strip()
+    if _env_hf:
+        _hist_candidates.append(_os.path.expanduser(_env_hf))
+    for _rel in ('~/.zsh_history', '~/.bash_history', '~/.ash_history', '~/.local/share/fish/fish_history', '~/.history'):
+        _hist_candidates.append(_os.path.expanduser(_rel))
+    _seen_paths = set()
+    _valid_files = []
+    for _p in _hist_candidates:
+        _ap = _os.path.abspath(_p)
+        if _ap in _seen_paths:
+            continue
+        _seen_paths.add(_ap)
+        if _os.path.isfile(_ap) and _os.access(_ap, _os.R_OK):
+            try:
+                _st = _os.stat(_ap)
+                if _st.st_size > 0:
+                    _valid_files.append((_st.st_mtime, _ap))
+            except Exception:
+                pass
+    _valid_files.sort(reverse=True)
+    _history_lines = []
+    _history_source = ''
+    if _valid_files:
+        _chosen = _valid_files[0][1]
+        _home = _os.path.abspath(_os.path.expanduser('~'))
+        _history_source = '~' + _chosen[len(_home):] if _chosen.startswith(_home + _os.sep) else _chosen
+        with open(_chosen, 'r', encoding='utf-8', errors='replace') as _hf:
+            _raw_lines = _hf.read().splitlines()
+        _is_fish = _chosen.endswith('fish_history')
+        _is_zsh = _chosen.endswith('zsh_history')
+        for _line in _raw_lines:
+            _s = _line.strip()
+            if not _s:
+                continue
+            if _is_fish:
+                if _s.startswith('- cmd:'):
+                    _cmd = _s[6:].strip()
+                    if _cmd:
+                        _history_lines.append(_cmd)
+                continue
+            if _is_zsh:
+                _m = _re.match(r'^:\s*\d+:\d+;(.*)$', _s)
+                if _m:
+                    _s = _m.group(1).strip()
+                if not _s or _s.startswith('#'):
+                    continue
+                _history_lines.append(_s)
+                continue
+            if _re.match(r'^#\d+$', _s) or _s.startswith('#'):
+                continue
+            _history_lines.append(_s)
+        if len(_history_lines) > 500:
+            _history_lines = _history_lines[-500:]
+        _history_lines.reverse()
+    data['shellHistory'] = _history_lines
+    data['shellHistorySource'] = _history_source
+except Exception:
+    data['shellHistory'] = []
+    data['shellHistorySource'] = ''
+"""
+
+# 全量功能页面数据采集脚本 (进程、容器、服务、定时任务、防火墙规则、文件树、Shell 历史)
 # 采用兼容 Python 3.5+ 的 Popen 实现，广泛支持各类旧版与新版 Linux 发行版
 REMOTE_FULL_INSPECT_SCRIPT = r'''python3 -c "
 import os, sys, json, subprocess, shutil, time
@@ -632,12 +708,16 @@ except Exception:
 data['cwd'] = target_dir
 data['files'] = files
 
+# SHELL_HISTORY_CODE
+
 print(json.dumps({'status': 'ok', 'data': data}))
 " 2>/dev/null'''
 
-# Share the /proc collector between full inspection and the lightweight process API.
+# Share the /proc and shell-history collectors between full inspection and lightweight endpoints.
 _inspection_code = shlex.split(REMOTE_FULL_INSPECT_SCRIPT)[2]
-REMOTE_FULL_INSPECT_SCRIPT = "python3 -c " + shlex.quote(_inspection_code.replace("# PROCESS_LIST_CODE", PROCESS_LIST_CODE))
+REMOTE_FULL_INSPECT_SCRIPT = "python3 -c " + shlex.quote(
+    _inspection_code.replace("# PROCESS_LIST_CODE", PROCESS_LIST_CODE).replace("# SHELL_HISTORY_CODE", SHELL_HISTORY_CODE)
+)
 
 def docker_exec_command(container: str, sudo: bool = False) -> str:
     """Only allow a Docker identifier and a fixed interactive shell command."""
@@ -846,6 +926,8 @@ class HostMetricsService:
                     "cpuCores": cpu_cores_usage if cpu_cores_usage else [cpu_usage],
                     "loadAvg": [round(x, 2) for x in raw_data.get("load", [0, 0, 0])],
                     "memUsedGb": round(raw_data.get("mem_used_mb", 0) / 1024, 2),
+                    "memAppGb": round(raw_data.get("mem_app_mb", 0) / 1024, 2),
+                    "memCacheGb": round(raw_data.get("mem_cache_mb", 0) / 1024, 2),
                     "memTotalGb": round(raw_data.get("mem_total_mb", 0) / 1024, 2),
                     "swapUsedGb": round(raw_data.get("swap_used_mb", 0) / 1024, 2),
                     "swapTotalGb": round(raw_data.get("swap_total_mb", 0) / 1024, 2),
@@ -935,7 +1017,9 @@ class HostMetricsService:
                     "systemdServices": inspect_data.get("systemdServices", []),
                     "cronTasks": cron_tasks,
                     "firewallRules": inspect_data.get("firewallRules", []),
-                    "files": inspect_data.get("files", [])
+                    "files": inspect_data.get("files", []),
+                    "shellHistory": inspect_data.get("shellHistory", []),
+                    "shellHistorySource": inspect_data.get("shellHistorySource", ""),
                 }
         except Exception as e:
             pass
@@ -1117,6 +1201,24 @@ except Exception as error:
     async def list_processes(self, host_alias: str) -> Dict[str, Any]:
         code = "import json\ndata = {}\n" + PROCESS_LIST_CODE + "\nprint(json.dumps(dict(status='error' if data.get('processesError') else 'ok', **data)))"
         return await self._run_remote_json_script(host_alias, code, {}, timeout=8)
+
+    async def fetch_shell_history(self, host_alias: str) -> Dict[str, Any]:
+        code = "import json\ndata = {}\n" + SHELL_HISTORY_CODE + "\nprint(json.dumps(dict(status='ok', **data)))"
+        result = await self._run_remote_json_script(host_alias, code, {}, timeout=8)
+        if result.get("status") != "ok":
+            return {
+                "status": "auth_failed" if result.get("error_type") == "auth_failed" else "error",
+                "host_alias": host_alias,
+                "shellHistory": [],
+                "shellHistorySource": "",
+                "message": result.get("message") or "未能读取当前主机的 Shell 历史记录",
+            }
+        return {
+            "status": "ok",
+            "host_alias": host_alias,
+            "shellHistory": result.get("shellHistory", []),
+            "shellHistorySource": result.get("shellHistorySource", ""),
+        }
 
     async def signal_process(self, host_alias: str, payload: ProcessSignalPayload) -> Dict[str, Any]:
         # Validate again at the service boundary; never interpolate request fields into shell code.

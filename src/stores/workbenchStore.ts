@@ -21,34 +21,10 @@ import type {
   FirewallRuleCreatePayload,
   FirewallRuleDeletePayload,
   FirewallActionResponse,
+  ShellHistoryResponse,
   CrossModuleLinkPayload
 } from '@/types'
 import { extractParameterizedClusters, computeCommandPrefixStats } from '@/services/commandExtractor'
-
-const INITIAL_HISTORY_LINES: string[] = [
-  'docker logs -f --tail 100 nginx-gateway',
-  'docker logs -f --tail 200 api-core-prod',
-  'docker logs -f --tail 50 redis-cache-01',
-  'docker logs -f --tail 500 worker-celery',
-  'journalctl -u nginx.service -n 100 --no-pager',
-  'journalctl -u termforyou-agent.service -n 200 --no-pager',
-  'journalctl -u mysql.service -n 50 --no-pager',
-  'sudo ufw allow from 10.16.0.0/16 to any port 5432 proto tcp',
-  'sudo ufw allow from 192.168.10.25 to any port 6379 proto tcp',
-  'sudo ufw allow from 172.18.0.0/24 to any port 3306 proto tcp',
-  'find /var/log/nginx -name "*.log" -mtime +7',
-  'find /opt/app/logs -name "*.gz" -mtime +30',
-  'find /tmp/uploads -name "*.tmp" -mtime +3',
-  'systemctl restart nginx.service',
-  'systemctl restart api-core.service',
-  'systemctl status redis-server.service',
-  'ss -tulnp | grep 8080',
-  'ss -tulnp | grep 6379',
-  'ss -tulnp | grep 3306',
-  'ls -la',
-  'cd /etc/nginx',
-  'pwd'
-]
 
 export const store = reactive({
   // 当前主页面路由 (默认进入主机连接池页面)
@@ -118,8 +94,11 @@ export const store = reactive({
     : true,
   isProbingAll: false,
 
-  // 原始历史命令池（用于 AST 骨架提炼）
-  rawHistoryLines: [...INITIAL_HISTORY_LINES],
+  // 原始历史命令池（从远端 Shell 历史采集，支持 AST 骨架提炼与前缀分布统计）
+  rawHistoryLines: [] as string[],
+  shellHistorySource: '',
+  shellHistoryLoading: false,
+  shellHistoryError: '',
 
   // 常用命令库 (Snippets)
   savedSnippets: [
@@ -721,27 +700,7 @@ export async function probeAllHosts(silent = false) {
 
           // 同步后端并发采集的真实指标数据，填充卡片所有健康项
           if (m && m.status === 'online') {
-            host.cpuUsage = m.cpuUsage
-            if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
-            if (m.loadAvg) host.loadAvg = m.loadAvg
-            host.memUsedGb = m.memUsedGb
-            host.memTotalGb = m.memTotalGb
-            host.swapUsedGb = m.swapUsedGb
-            host.swapTotalGb = m.swapTotalGb
-            host.diskUsedPercent = m.diskUsedPercent
-            if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
-            if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
-            if (m.diskReadKbps !== undefined) host.diskReadKbps = m.diskReadKbps
-            if (m.diskWriteKbps !== undefined) host.diskWriteKbps = m.diskWriteKbps
-            host.netUpKbps = m.netUpKbps
-            host.netDownKbps = m.netDownKbps
-            host.uptime = m.uptime
-            if (m.os) host.os = m.os
-            if (m.kernel) host.kernel = m.kernel
-            if (m.firewallBackend) host.firewallBackend = m.firewallBackend
-            if (typeof m.firewallEnabled === 'boolean') host.firewallEnabled = m.firewallEnabled
-            host.metricsStatus = 'synced'
-            host.lastMetricsUpdate = Date.now()
+            applyHostMetrics(host, m)
           }
         } else if (!probeRes.online) {
           offlineCount++
@@ -822,6 +781,8 @@ export interface HostMetricsResponse {
   cpuCores: number[]
   loadAvg: [number, number, number]
   memUsedGb: number
+  memAppGb?: number
+  memCacheGb?: number
   memTotalGb: number
   swapUsedGb: number
   swapTotalGb: number
@@ -842,6 +803,32 @@ export interface HostMetricsResponse {
   auth_method?: 'password' | 'default_key' | 'custom_key'
 }
 
+function applyHostMetrics(host: ServerHost, m: HostMetricsResponse) {
+  host.cpuUsage = m.cpuUsage
+  if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
+  if (m.loadAvg) host.loadAvg = m.loadAvg
+  host.memUsedGb = m.memUsedGb
+  if (m.memAppGb !== undefined) host.memAppGb = m.memAppGb
+  if (m.memCacheGb !== undefined) host.memCacheGb = m.memCacheGb
+  host.memTotalGb = m.memTotalGb
+  host.swapUsedGb = m.swapUsedGb
+  host.swapTotalGb = m.swapTotalGb
+  host.diskUsedPercent = m.diskUsedPercent
+  if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
+  if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
+  if (m.diskReadKbps !== undefined) host.diskReadKbps = m.diskReadKbps
+  if (m.diskWriteKbps !== undefined) host.diskWriteKbps = m.diskWriteKbps
+  host.netUpKbps = m.netUpKbps
+  host.netDownKbps = m.netDownKbps
+  host.uptime = m.uptime
+  if (m.os) host.os = m.os
+  if (m.kernel) host.kernel = m.kernel
+  if (m.firewallBackend) host.firewallBackend = m.firewallBackend
+  if (typeof m.firewallEnabled === 'boolean') host.firewallEnabled = m.firewallEnabled
+  host.metricsStatus = 'synced'
+  host.lastMetricsUpdate = Date.now()
+}
+
 let metricsTimer: ReturnType<typeof setInterval> | null = null
 export const METRICS_POLL_INTERVAL_MS = 3000 // 默认 3 秒更新频率，轻量且实时
 
@@ -859,30 +846,8 @@ export async function fetchHostMetrics(hostId: string) {
     }
     const data: HostMetricsResponse = await res.json()
     if (data.status === 'online') {
-      targetHost.cpuUsage = data.cpuUsage
-      if (data.cpuCores && data.cpuCores.length > 0) {
-        targetHost.cpuCores = data.cpuCores
-      }
-      targetHost.loadAvg = data.loadAvg
-      targetHost.memUsedGb = data.memUsedGb
-      targetHost.memTotalGb = data.memTotalGb
-      targetHost.swapUsedGb = data.swapUsedGb
-      targetHost.swapTotalGb = data.swapTotalGb
-      targetHost.diskUsedPercent = data.diskUsedPercent
-      if (data.diskUsedGb !== undefined) targetHost.diskUsedGb = data.diskUsedGb
-      if (data.diskTotalGb !== undefined) targetHost.diskTotalGb = data.diskTotalGb
-      if (data.diskReadKbps !== undefined) targetHost.diskReadKbps = data.diskReadKbps
-      if (data.diskWriteKbps !== undefined) targetHost.diskWriteKbps = data.diskWriteKbps
-      targetHost.netUpKbps = data.netUpKbps
-      targetHost.netDownKbps = data.netDownKbps
-      targetHost.uptime = data.uptime
-      if (data.os) targetHost.os = data.os
-      if (data.kernel) targetHost.kernel = data.kernel
-      if (data.firewallBackend) targetHost.firewallBackend = data.firewallBackend
-      if (typeof data.firewallEnabled === 'boolean') targetHost.firewallEnabled = data.firewallEnabled
+      applyHostMetrics(targetHost, data)
       targetHost.status = 'online'
-      targetHost.metricsStatus = 'synced'
-      targetHost.lastMetricsUpdate = Date.now()
     } else {
       targetHost.status = 'offline'
       targetHost.metricsStatus = 'error'
@@ -1103,10 +1068,12 @@ export async function removeDockerContainer(containerName: string, force = false
 
 // 校验服务器与请求序号，防止过期巡检覆盖当前计划任务和容器列表。
 let inspectionRequestVersion = 0
+let shellHistoryRequestVersion = 0
 
 function beginInspectionLoad(hostId: string): number {
   if (store.activeHostId !== hostId) return -1
   inspectionProcessVersion = ++processRequestVersion
+  ++shellHistoryRequestVersion
   store.processesLoading = true
   store.cronTasksLoading = true
   store.cronTasksError = ''
@@ -1116,13 +1083,27 @@ function beginInspectionLoad(hostId: string): number {
   store.systemdServicesError = ''
   store.firewallRulesLoading = true
   store.firewallRulesError = ''
+  store.shellHistoryLoading = true
+  store.shellHistoryError = ''
   return ++inspectionRequestVersion
 }
 
 function finishInspectionLoad(
   hostId: string,
   version: number,
-  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; systemdServices?: SystemdServiceItem[]; firewallRules?: FirewallRuleItem[]; processes?: ProcessItem[]; processesError?: string; message?: string; timezone?: ServerTimezone }
+  data?: {
+    status?: string
+    cronTasks?: CronTaskItem[]
+    dockerContainers?: DockerContainerItem[]
+    systemdServices?: SystemdServiceItem[]
+    firewallRules?: FirewallRuleItem[]
+    processes?: ProcessItem[]
+    processesError?: string
+    shellHistory?: string[]
+    shellHistorySource?: string
+    message?: string
+    timezone?: ServerTimezone
+  }
 ) {
   if (version !== inspectionRequestVersion || store.activeHostId !== hostId) return
   if (inspectionProcessVersion === processRequestVersion) {
@@ -1185,6 +1166,48 @@ function finishInspectionLoad(
   } else {
     store.firewallRules = []
     store.firewallRulesError = data?.message || '未能读取当前服务器的防火墙规则，请重试'
+  }
+  store.shellHistoryLoading = false
+  if (data?.status === 'ok' && Array.isArray(data.shellHistory)) {
+    store.rawHistoryLines = data.shellHistory
+    store.shellHistorySource = data.shellHistorySource || ''
+    store.shellHistoryError = ''
+  } else {
+    store.rawHistoryLines = []
+    store.shellHistorySource = ''
+    store.shellHistoryError = data?.message || '未能读取当前主机的 Shell 历史记录，请重试'
+  }
+}
+
+export async function refreshShellHistory(hostId = store.activeHostId): Promise<boolean> {
+  if (!hostId) {
+    store.rawHistoryLines = []
+    store.shellHistorySource = ''
+    store.shellHistoryError = '请先选择或连接一台主机'
+    store.shellHistoryLoading = false
+    return false
+  }
+  const reqVersion = ++shellHistoryRequestVersion
+  store.shellHistoryLoading = true
+  store.shellHistoryError = ''
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/v1/ssh/history/${encodeURIComponent(hostId)}`)
+    const data = await res.json().catch(() => ({})) as Partial<ShellHistoryResponse> & { detail?: string }
+    if (reqVersion !== shellHistoryRequestVersion || store.activeHostId !== hostId) return false
+    store.shellHistoryLoading = false
+    if (!res.ok || data.status !== 'ok' || !Array.isArray(data.shellHistory)) {
+      store.shellHistoryError = data.message || data.detail || `采集 Shell 历史失败 (HTTP ${res.status})`
+      return false
+    }
+    store.rawHistoryLines = data.shellHistory
+    store.shellHistorySource = data.shellHistorySource || ''
+    store.shellHistoryError = ''
+    return true
+  } catch {
+    if (reqVersion !== shellHistoryRequestVersion || store.activeHostId !== hostId) return false
+    store.shellHistoryLoading = false
+    store.shellHistoryError = '未能连接后端服务，Shell 历史采集失败'
+    return false
   }
 }
 
@@ -1265,28 +1288,7 @@ export async function inspectHost(hostId: string) {
     if (data.status === 'ok' || data.status === 'partial') {
       // 1. 同步健康与系统性能指标
       if (data.metrics && data.metrics.status === 'online') {
-        const m = data.metrics
-        host.cpuUsage = m.cpuUsage
-        if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
-        if (m.loadAvg) host.loadAvg = m.loadAvg
-        host.memUsedGb = m.memUsedGb
-        host.memTotalGb = m.memTotalGb
-        host.swapUsedGb = m.swapUsedGb
-        host.swapTotalGb = m.swapTotalGb
-        host.diskUsedPercent = m.diskUsedPercent
-        if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
-        if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
-        if (m.diskReadKbps !== undefined) host.diskReadKbps = m.diskReadKbps
-        if (m.diskWriteKbps !== undefined) host.diskWriteKbps = m.diskWriteKbps
-        host.netUpKbps = m.netUpKbps
-        host.netDownKbps = m.netDownKbps
-        host.uptime = m.uptime
-        if (m.os) host.os = m.os
-        if (m.kernel) host.kernel = m.kernel
-        if (m.firewallBackend) host.firewallBackend = m.firewallBackend
-        if (typeof m.firewallEnabled === 'boolean') host.firewallEnabled = m.firewallEnabled
-        host.metricsStatus = 'synced'
-        host.lastMetricsUpdate = Date.now()
+        applyHostMetrics(host, data.metrics)
       }
 
       // 2. 若是当前正在操作的主机，深度实装所有页面含有的真实数据
@@ -1353,28 +1355,7 @@ export async function probeHost(hostId: string) {
       if (!isAuthFailed && probeRes.inspection && (probeRes.inspection.status === 'ok' || probeRes.inspection.status === 'partial')) {
         const insp = probeRes.inspection
         if (insp.metrics && insp.metrics.status === 'online') {
-          const m = insp.metrics
-          host.cpuUsage = m.cpuUsage
-          if (m.cpuCores && m.cpuCores.length > 0) host.cpuCores = m.cpuCores
-          if (m.loadAvg) host.loadAvg = m.loadAvg
-          host.memUsedGb = m.memUsedGb
-          host.memTotalGb = m.memTotalGb
-          host.swapUsedGb = m.swapUsedGb
-          host.swapTotalGb = m.swapTotalGb
-          host.diskUsedPercent = m.diskUsedPercent
-          if (m.diskUsedGb !== undefined) host.diskUsedGb = m.diskUsedGb
-          if (m.diskTotalGb !== undefined) host.diskTotalGb = m.diskTotalGb
-          if (m.diskReadKbps !== undefined) host.diskReadKbps = m.diskReadKbps
-          if (m.diskWriteKbps !== undefined) host.diskWriteKbps = m.diskWriteKbps
-          host.netUpKbps = m.netUpKbps
-          host.netDownKbps = m.netDownKbps
-          host.uptime = m.uptime
-          if (m.os) host.os = m.os
-          if (m.kernel) host.kernel = m.kernel
-          if (m.firewallBackend) host.firewallBackend = m.firewallBackend
-          if (typeof m.firewallEnabled === 'boolean') host.firewallEnabled = m.firewallEnabled
-          host.metricsStatus = 'synced'
-          host.lastMetricsUpdate = Date.now()
+          applyHostMetrics(host, insp.metrics)
         }
 
         if (store.activeHostId === hostId) {
@@ -1500,6 +1481,11 @@ watch(
     store.firewallRules = []
     store.firewallRulesError = ''
     store.firewallRulesLoading = !!newId
+    ++shellHistoryRequestVersion
+    store.rawHistoryLines = []
+    store.shellHistorySource = ''
+    store.shellHistoryError = ''
+    store.shellHistoryLoading = !!newId
     if (newId) void inspectHost(newId)
   },
   { flush: 'sync' }

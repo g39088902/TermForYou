@@ -171,3 +171,11 @@ class FirewallRuleDeletePayload(BaseModel):
     ruleNumber: Optional[int] = None
     backend: Optional[Literal["ufw", "firewalld", "iptables"]] = None
     sudo: bool = False
+
+
+class ShellHistoryResponse(BaseModel):
+    status: Literal["ok", "auth_failed", "error"]
+    host_alias: str
+    shellHistory: List[str] = []
+    shellHistorySource: str = ""
+    message: Optional[str] = None

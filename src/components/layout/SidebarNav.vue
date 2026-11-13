@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { store, extractedClusters, hasConnectedHost, showToast } from '@/stores/workbenchStore'
+import { store, hasConnectedHost, showToast } from '@/stores/workbenchStore'
 import type { PageId } from '@/types'
 import {
   LayoutGrid,
   TerminalSquare,
   Activity,
   FolderOpen,
-  Sparkles,
+  History,
   Container,
   Cog,
   CalendarClock,
@@ -61,10 +61,10 @@ const navItems = computed(() => [
   },
   {
     id: 'P4_COMMANDS' as PageId,
-    label: '命令提炼与库',
+    label: '历史命令',
     shortCode: 'P4',
-    icon: Sparkles,
-    badge: extractedClusters.value.length > 0 ? `${extractedClusters.value.length} 提炼` : ''
+    icon: History,
+    badge: ''
   },
   {
     id: 'P3_FILES' as PageId,

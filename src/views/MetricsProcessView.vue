@@ -58,6 +58,22 @@ const filteredProcesses = computed(() => {
 const processSudo = ref(false)
 watch(() => store.activeHostId, () => { processSudo.value = false })
 let refreshTimer: ReturnType<typeof setInterval> | undefined
+
+const memoryBreakdown = computed(() => {
+  const host = currentHost.value
+  const total = host?.memTotalGb ?? 0
+  if (!total || total <= 0) {
+    return { appPercent: 0, cachePercent: 0, appGb: undefined as number | undefined, cacheGb: undefined as number | undefined }
+  }
+  if (host?.memAppGb !== undefined && host?.memCacheGb !== undefined) {
+    const appPercent = Math.min(100, Math.max(0, (host.memAppGb / total) * 100))
+    const cachePercent = Math.min(100 - appPercent, Math.max(0, (host.memCacheGb / total) * 100))
+    return { appPercent, cachePercent, appGb: host.memAppGb, cacheGb: host.memCacheGb }
+  }
+  const fallbackUsed = host?.memUsedGb ?? 0
+  const appPercent = Math.min(100, Math.max(0, (fallbackUsed / total) * 100))
+  return { appPercent, cachePercent: 0, appGb: undefined, cacheGb: undefined }
+})
 onMounted(() => {
   void refreshProcesses()
   refreshTimer = setInterval(() => {
@@ -143,15 +159,25 @@ async function sendSignal(proc: ProcessItem, signal: ProcessSignal) {
             </div>
             <div class="h-2.5 rounded-full bg-slate-950 border border-slate-800 overflow-hidden flex">
               <div
-                class="bg-emerald-500 h-full"
-                :style="{ width: `${currentHost.memTotalGb ? (currentHost.memUsedGb! / currentHost.memTotalGb) * 80 : 0}%` }"
-                title="应用独占内存"
+                class="bg-emerald-500 h-full transition-all duration-300"
+                :style="{ width: `${memoryBreakdown.appPercent}%` }"
+                :title="memoryBreakdown.appGb !== undefined ? `应用独占内存: ${memoryBreakdown.appGb} GB` : '应用独占内存'"
               />
               <div
-                class="bg-cyan-500/60 h-full"
-                :style="{ width: `${currentHost.memTotalGb ? (currentHost.memUsedGb! / currentHost.memTotalGb) * 20 : 0}%` }"
-                title="PageCache / Buffers"
+                class="bg-cyan-500/60 h-full transition-all duration-300"
+                :style="{ width: `${memoryBreakdown.cachePercent}%` }"
+                :title="memoryBreakdown.cacheGb !== undefined ? `PageCache / Buffers: ${memoryBreakdown.cacheGb} GB` : 'PageCache / Buffers'"
               />
+            </div>
+            <div v-if="memoryBreakdown.appGb !== undefined && memoryBreakdown.cacheGb !== undefined" class="flex items-center justify-between text-[10px] text-slate-400 font-mono">
+              <span class="inline-flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-emerald-500" />
+                应用独占 {{ memoryBreakdown.appGb }} GB
+              </span>
+              <span class="inline-flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full bg-cyan-500/70" />
+                PageCache / Buffers {{ memoryBreakdown.cacheGb }} GB
+              </span>
             </div>
           </div>
 
