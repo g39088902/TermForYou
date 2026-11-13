@@ -25,6 +25,11 @@ const failedServiceCount = computed(() => {
   return store.systemdServices.filter((s) => s.state === 'failed').length
 })
 
+const runningServiceCount = computed(() => {
+  if (!hasConnectedHost.value) return 0
+  return store.systemdServices.filter((s) => s.state === 'running').length
+})
+
 function handleNavClick(itemId: PageId) {
   if (itemId === 'P0_HOSTS') {
     store.activePage = 'P0_HOSTS'
@@ -87,7 +92,7 @@ const navItems = computed(() => [
     label: '系统服务',
     shortCode: 'P6',
     icon: Cog,
-    badge: failedServiceCount.value > 0 ? `${failedServiceCount.value} 异常` : '',
+    badge: `${runningServiceCount.value} 运行`,
     dangerBadge: failedServiceCount.value > 0
   },
   {

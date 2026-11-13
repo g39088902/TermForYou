@@ -4,7 +4,6 @@ import {
   store,
   currentHost,
   openFileInEditor,
-  executeTerminalCommand,
   showToast,
   fetchRemoteDirectory,
   fetchDirectoryDiskUsage,
@@ -17,7 +16,6 @@ import {
   FileArchive,
   Bookmark,
   Shield,
-  Terminal,
   Upload,
   Archive,
   PieChart,
@@ -1250,14 +1248,6 @@ onUnmounted(() => {
           <span class="text-[11px] font-mono text-slate-400">
             共 {{ filteredFiles.length }} 项
           </span>
-          <button
-            type="button"
-            @click="executeTerminalCommand(`cd ${currentCwd}`, true)"
-            class="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 text-xs cursor-pointer"
-          >
-            <Terminal class="w-3.5 h-3.5" />
-            <span>在终端打开此目录</span>
-          </button>
         </div>
       </div>
 

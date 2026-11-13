@@ -40,6 +40,10 @@ class DockerRestartPayload(BaseModel):
 class DockerActionPayload(DockerRestartPayload):
     action: Literal["start", "stop"]
 
+class SystemdActionPayload(BaseModel):
+    action: Literal["start", "stop", "restart"]
+    sudo: bool = False
+
 class CronTaskCreatePayload(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     expression: str = Field(min_length=1, max_length=200)
@@ -147,3 +151,23 @@ class SingleDirSizePayload(BaseModel):
 
 class DownloadBatchPayload(BaseModel):
     paths: List[str]
+
+
+class FirewallRuleCreatePayload(BaseModel):
+    port: str
+    protocol: Literal["tcp", "udp", "any"] = "tcp"
+    sourceCidr: str = "0.0.0.0/0"
+    action: Literal["ALLOW", "DENY", "REJECT"] = "ALLOW"
+    comment: str = ""
+    sudo: bool = False
+    backend: Optional[Literal["ufw", "firewalld", "iptables"]] = None
+
+
+class FirewallRuleDeletePayload(BaseModel):
+    port: str
+    protocol: Literal["tcp", "udp", "any"] = "tcp"
+    sourceCidr: str = "0.0.0.0/0"
+    action: Literal["ALLOW", "DENY", "REJECT"] = "ALLOW"
+    ruleNumber: Optional[int] = None
+    backend: Optional[Literal["ufw", "firewalld", "iptables"]] = None
+    sudo: bool = False

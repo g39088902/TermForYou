@@ -12,10 +12,15 @@ import type {
   CronTaskItem,
   ServerTimezone,
   SystemdServiceItem,
+  SystemdServiceAction,
+  SystemdActionResponse,
   DockerContainerItem,
   DockerActionResponse,
   DockerContainerAction,
   FirewallRuleItem,
+  FirewallRuleCreatePayload,
+  FirewallRuleDeletePayload,
+  FirewallActionResponse,
   CrossModuleLinkPayload
 } from '@/types'
 import { extractParameterizedClusters, computeCommandPrefixStats } from '@/services/commandExtractor'
@@ -324,59 +329,10 @@ WantedBy=multi-user.target`
   serverTimezone: null as ServerTimezone | null,
 
   // Systemd 系统服务列表
-  systemdServices: [
-    {
-      name: 'nginx.service',
-      description: 'A high performance web server and a reverse proxy server',
-      state: 'running',
-      enabled: true,
-      pid: 1042,
-      memoryMb: 342,
-      uptime: '48d 14h',
-      unitFilePath: '/lib/systemd/system/nginx.service',
-      workingDir: '/etc/nginx',
-      execStart: '/usr/sbin/nginx -g "daemon on; master_process on;"',
-      restartPolicy: 'on-failure',
-      recentLogs: [
-        'Nov 10 09:20:01 prod-web-01 systemd[1]: Reloaded A high performance web server.',
-        'Nov 10 11:02:44 prod-web-01 nginx[1042]: 2026/11/10 11:02:44 [notice] signal 1 (SIGHUP) received'
-      ]
-    },
-    {
-      name: 'api-core.service',
-      description: 'TermForYou Core API Service (Go Backend)',
-      state: 'running',
-      enabled: true,
-      pid: 2891,
-      memoryMb: 2380,
-      uptime: '12d 06h',
-      unitFilePath: '/etc/systemd/system/api-core.service',
-      workingDir: '/opt/api-core',
-      execStart: '/opt/api-core/bin/server --port 8080 --env prod',
-      restartPolicy: 'always',
-      recentLogs: [
-        'Nov 10 11:00:00 prod-web-01 api-core[2891]: [INFO] Worker pool heartbeat OK (active=12/64)',
-        'Nov 10 11:06:15 prod-web-01 api-core[2891]: [INFO] Metrics snapshot flushed in 4.2ms'
-      ]
-    },
-    {
-      name: 'celery-beat.service',
-      description: 'Distributed Task Queue Periodic Scheduler',
-      state: 'failed',
-      enabled: true,
-      memoryMb: 0,
-      uptime: '已停止 (ExitCode=1)',
-      unitFilePath: '/etc/systemd/system/celery-beat.service',
-      workingDir: '/opt/worker',
-      execStart: '/opt/worker/venv/bin/celery -A tasks beat --loglevel=INFO',
-      restartPolicy: 'on-failure',
-      recentLogs: [
-        'Nov 10 10:42:11 prod-web-01 celery[8821]: ERROR: Pidfile (/var/run/celery/beat.pid) already exists.',
-        'Nov 10 10:42:11 prod-web-01 systemd[1]: celery-beat.service: Main process exited, code=exited, status=1/FAILURE',
-        'Nov 10 10:42:11 prod-web-01 systemd[1]: celery-beat.service: Failed with result "exit-code".'
-      ]
-    }
-  ] as SystemdServiceItem[],
+  systemdServices: [] as SystemdServiceItem[],
+  systemdServicesLoading: false,
+  systemdServicesError: '',
+  systemdServiceActions: {} as Record<string, SystemdServiceAction>,
 
   // Docker 容器列表
   dockerContainers: [] as DockerContainerItem[],
@@ -385,47 +341,11 @@ WantedBy=multi-user.target`
   dockerContainerActions: {} as Record<string, DockerContainerAction>,
 
   // 防火墙规则列表
-  firewallRules: [
-    {
-      id: 'fw-1',
-      port: '22',
-      protocol: 'tcp',
-      sourceCidr: '0.0.0.0/0',
-      action: 'ALLOW',
-      comment: 'SSH 远程管理端口 (防锁死保护)',
-      enabled: true,
-      listeningProcess: { pid: 812, name: 'sshd', type: 'process' }
-    },
-    {
-      id: 'fw-2',
-      port: '80,443',
-      protocol: 'tcp',
-      sourceCidr: '0.0.0.0/0',
-      action: 'ALLOW',
-      comment: 'Nginx HTTP/HTTPS 公网入口',
-      enabled: true,
-      listeningProcess: { pid: 1042, name: 'nginx-gateway', type: 'docker', targetId: 'c-nginx-01' }
-    },
-    {
-      id: 'fw-3',
-      port: '6379',
-      protocol: 'tcp',
-      sourceCidr: '192.168.10.0/24',
-      action: 'ALLOW',
-      comment: 'Redis 缓存内网白名单访问',
-      enabled: true,
-      listeningProcess: { pid: 4120, name: 'redis-cache-01', type: 'docker', targetId: 'c-redis-01' }
-    },
-    {
-      id: 'fw-4',
-      port: '3306',
-      protocol: 'tcp',
-      sourceCidr: '172.18.0.0/24',
-      action: 'ALLOW',
-      comment: '旧版 MySQL 遗留规则 (当前无进程监听)',
-      enabled: true
-    }
-  ] as FirewallRuleItem[]
+  firewallRules: [] as FirewallRuleItem[],
+  firewallRulesLoading: false,
+  firewallRulesError: '',
+  firewallMutating: false,
+  firewallDeletingId: ''
 })
 
 const FALLBACK_EMPTY_HOST: ServerHost = {
@@ -1066,6 +986,101 @@ export async function controlDockerContainer(containerId: string, action: Docker
   }
 }
 
+export async function controlSystemdService(serviceName: string, action: SystemdServiceAction, sudo = false): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+  const label = { start: '启动', stop: '停止', restart: '重启' }[action]
+  const key = `${hostId}/${serviceName}`
+  if (store.systemdServiceActions[key]) return false
+  store.systemdServiceActions[key] = action
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/systemd/${encodeURIComponent(hostId)}/services/${encodeURIComponent(serviceName)}/action`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, sudo }) }
+    )
+    const data: SystemdActionResponse = await res.json()
+    if (!res.ok || data.status !== 'ok') {
+      showToast(`${label}失败：${data.message || data.detail || '后端服务异常'}`)
+      return false
+    }
+    showToast(data.message || `服务已${label}`)
+    if (store.activeHostId === hostId) await inspectHost(hostId)
+    return true
+  } catch {
+    showToast(`未能确认服务${label}结果，请刷新状态后再操作`)
+    return false
+  } finally {
+    delete store.systemdServiceActions[key]
+  }
+}
+
+export async function createFirewallRule(payload: FirewallRuleCreatePayload): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId || store.firewallMutating) return false
+  store.firewallMutating = true
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/firewall/${encodeURIComponent(hostId)}/rules`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }
+    )
+    const data: FirewallActionResponse = await res.json().catch(() => ({ status: 'error' }))
+    if (!res.ok || data.status !== 'ok') {
+      showToast(`添加规则失败：${data.message || data.detail || `HTTP ${res.status}`}`)
+      return false
+    }
+    showToast(data.message || '防火墙规则已应用')
+    if (store.activeHostId === hostId) await inspectHost(hostId)
+    return true
+  } catch {
+    showToast('未能确认防火墙规则应用结果，请刷新规则列表后再操作')
+    return false
+  } finally {
+    store.firewallMutating = false
+  }
+}
+
+export async function deleteFirewallRule(rule: FirewallRuleItem, sudo = false): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId || store.firewallDeletingId) return false
+  store.firewallDeletingId = rule.id
+  const payload: FirewallRuleDeletePayload = {
+    port: rule.port,
+    protocol: rule.protocol,
+    sourceCidr: rule.sourceCidr,
+    action: rule.action,
+    ruleNumber: rule.ruleNumber,
+    backend: rule.backend ?? currentHost.value.firewallBackend,
+    sudo
+  }
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/firewall/${encodeURIComponent(hostId)}/rules/delete`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      }
+    )
+    const data: FirewallActionResponse = await res.json().catch(() => ({ status: 'error' }))
+    if (!res.ok || data.status !== 'ok') {
+      showToast(`删除规则失败：${data.message || data.detail || `HTTP ${res.status}`}`)
+      return false
+    }
+    showToast(data.message || '防火墙规则已删除')
+    if (store.activeHostId === hostId) await inspectHost(hostId)
+    return true
+  } catch {
+    showToast('未能确认防火墙规则删除结果，请刷新规则列表后再操作')
+    return false
+  } finally {
+    store.firewallDeletingId = ''
+  }
+}
+
 export async function removeDockerContainer(containerName: string, force = false, removeVolumes = false): Promise<boolean> {
   const hostId = store.activeHostId
   try {
@@ -1097,13 +1112,17 @@ function beginInspectionLoad(hostId: string): number {
   store.cronTasksError = ''
   store.dockerContainersLoading = true
   store.dockerContainersError = ''
+  store.systemdServicesLoading = true
+  store.systemdServicesError = ''
+  store.firewallRulesLoading = true
+  store.firewallRulesError = ''
   return ++inspectionRequestVersion
 }
 
 function finishInspectionLoad(
   hostId: string,
   version: number,
-  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; processes?: ProcessItem[]; processesError?: string; message?: string; timezone?: ServerTimezone }
+  data?: { status?: string; cronTasks?: CronTaskItem[]; dockerContainers?: DockerContainerItem[]; systemdServices?: SystemdServiceItem[]; firewallRules?: FirewallRuleItem[]; processes?: ProcessItem[]; processesError?: string; message?: string; timezone?: ServerTimezone }
 ) {
   if (version !== inspectionRequestVersion || store.activeHostId !== hostId) return
   if (inspectionProcessVersion === processRequestVersion) {
@@ -1133,6 +1152,39 @@ function finishInspectionLoad(
   } else {
     store.dockerContainers = []
     store.dockerContainersError = data?.message || '未能读取当前服务器的容器列表，请重试'
+  }
+  store.systemdServicesLoading = false
+  if (data?.status === 'ok' && Array.isArray(data.systemdServices)) {
+    store.systemdServices = data.systemdServices
+    store.systemdServicesError = ''
+  } else {
+    store.systemdServices = []
+    store.systemdServicesError = data?.message || '未能读取当前服务器的系统服务列表，请重试'
+  }
+  store.firewallRulesLoading = false
+  if (data?.status === 'ok' && Array.isArray(data.firewallRules)) {
+    store.firewallRules = data.firewallRules.map((rule) => {
+      if (rule.listeningProcess) return rule
+      const portNum = Number(rule.port)
+      if (!Number.isInteger(portNum)) return rule
+      const matched = store.processes.find(
+        (p) => p.listenPort === portNum && (rule.protocol === 'any' || !p.protocol || p.protocol === rule.protocol)
+      )
+      if (!matched) return rule
+      return {
+        ...rule,
+        listeningProcess: {
+          pid: matched.pid,
+          name: matched.name,
+          type: matched.dockerContainerId ? 'docker' : 'process',
+          targetId: matched.dockerContainerId
+        }
+      }
+    })
+    store.firewallRulesError = ''
+  } else {
+    store.firewallRules = []
+    store.firewallRulesError = data?.message || '未能读取当前服务器的防火墙规则，请重试'
   }
 }
 
@@ -1239,12 +1291,6 @@ export async function inspectHost(hostId: string) {
 
       // 2. 若是当前正在操作的主机，深度实装所有页面含有的真实数据
       if (store.activeHostId === hostId) {
-        if (Array.isArray(data.systemdServices) && data.systemdServices.length > 0) {
-          store.systemdServices = data.systemdServices
-        }
-        if (Array.isArray(data.firewallRules) && data.firewallRules.length > 0) {
-          store.firewallRules = data.firewallRules
-        }
         if (data.cwd && !host.currentCwd) {
           host.currentCwd = data.cwd
         }
@@ -1332,8 +1378,6 @@ export async function probeHost(hostId: string) {
         }
 
         if (store.activeHostId === hostId) {
-          if (Array.isArray(insp.systemdServices) && insp.systemdServices.length > 0) store.systemdServices = insp.systemdServices
-          if (Array.isArray(insp.firewallRules) && insp.firewallRules.length > 0) store.firewallRules = insp.firewallRules
           if (insp.cwd && !host.currentCwd) host.currentCwd = insp.cwd
           if (Array.isArray(insp.files) && insp.files.length > 0) {
             if (!host.currentCwd || host.currentCwd === insp.cwd) {
@@ -1450,6 +1494,12 @@ watch(
     store.dockerContainers = []
     store.dockerContainersError = ''
     store.dockerContainersLoading = !!newId
+    store.systemdServices = []
+    store.systemdServicesError = ''
+    store.systemdServicesLoading = !!newId
+    store.firewallRules = []
+    store.firewallRulesError = ''
+    store.firewallRulesLoading = !!newId
     if (newId) void inspectHost(newId)
   },
   { flush: 'sync' }

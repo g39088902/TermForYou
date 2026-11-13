@@ -2,34 +2,31 @@
 import { ref, computed } from 'vue'
 import {
   store,
-  executeTerminalCommand,
-  openFileInEditor,
-  navigateWithContext,
-  showToast
+  controlSystemdService,
+  inspectHost,
+  navigateWithContext
 } from '@/stores/workbenchStore'
-import type { SystemdServiceItem } from '@/types'
+import type { SystemdServiceItem, SystemdServiceAction } from '@/types'
 import {
   Cog,
   Play,
   Square,
   RotateCw,
-  FileCode2,
   FolderOpen,
-  Plus,
-  Terminal
+  Loader2,
+  RefreshCw,
+  ShieldAlert
 } from 'lucide-vue-next'
 
 const stateFilter = ref<'ALL' | 'running' | 'failed'>('ALL')
-const selectedService = ref<SystemdServiceItem>(store.systemdServices[0])
+const selectedServiceName = ref<string | null>(null)
+const useSudo = ref(false)
+const confirmDialogRef = ref<HTMLDialogElement | null>(null)
+const pendingAction = ref<{ service: SystemdServiceItem; action: 'stop' | 'restart' } | null>(null)
 
-// 新建自定义 Systemd 服务可视化向导表单
-const newSvcForm = ref({
-  name: 'my-worker',
-  description: 'Custom Background Queue Worker',
-  workingDir: '/opt/worker',
-  execStart: '/usr/bin/python3 main.py --workers 4',
-  user: 'www-data',
-  restartPolicy: 'always' as 'always' | 'on-failure' | 'no'
+const selectedService = computed<SystemdServiceItem | null>(() => {
+  if (!selectedServiceName.value) return null
+  return store.systemdServices.find((s) => s.name === selectedServiceName.value) ?? null
 })
 
 const filteredServices = computed(() => {
@@ -37,61 +34,36 @@ const filteredServices = computed(() => {
   return store.systemdServices.filter((s) => s.state === stateFilter.value)
 })
 
-const generatedUnitContent = computed(() => {
-  const f = newSvcForm.value
-  return `[Unit]
-Description=${f.description}
-After=network.target
-
-[Service]
-Type=simple
-User=${f.user}
-WorkingDirectory=${f.workingDir}
-ExecStart=${f.execStart}
-Restart=${f.restartPolicy}
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target`
-})
-
-function controlService(svc: SystemdServiceItem, action: 'start' | 'stop' | 'restart') {
-  executeTerminalCommand(`sudo systemctl ${action} ${svc.name}`)
-  if (action === 'start' || action === 'restart') {
-    svc.state = 'running'
-    svc.uptime = '刚刚启动 (0m)'
-  } else if (action === 'stop') {
-    svc.state = 'stopped'
-  }
+function serviceAction(serviceName: string): SystemdServiceAction | undefined {
+  if (!store.activeHostId) return undefined
+  return store.systemdServiceActions[`${store.activeHostId}/${serviceName}`]
 }
 
-function createNewSystemdService() {
-  const unitName = newSvcForm.value.name.endsWith('.service')
-    ? newSvcForm.value.name
-    : `${newSvcForm.value.name}.service`
-  const unitPath = `/etc/systemd/system/${unitName}`
-
-  const newItem: SystemdServiceItem = {
-    name: unitName,
-    description: newSvcForm.value.description,
-    state: 'running',
-    enabled: true,
-    pid: Math.floor(Math.random() * 6000) + 2000,
-    memoryMb: 64,
-    uptime: '刚刚启动',
-    unitFilePath: unitPath,
-    workingDir: newSvcForm.value.workingDir,
-    execStart: newSvcForm.value.execStart,
-    restartPolicy: newSvcForm.value.restartPolicy,
-    recentLogs: [`Nov 10 11:15:00 systemd[1]: Started ${newSvcForm.value.description}.`]
+function handleActionClick(svc: SystemdServiceItem, action: SystemdServiceAction) {
+  if (serviceAction(svc.name)) return
+  if (action === 'start') {
+    void controlSystemdService(svc.name, 'start', useSudo.value)
+    return
   }
+  pendingAction.value = { service: svc, action }
+  confirmDialogRef.value?.showModal()
+}
 
-  store.systemdServices.unshift(newItem)
-  selectedService.value = newItem
-  executeTerminalCommand(
-    `sudo tee ${unitPath} > /dev/null && sudo systemctl daemon-reload && sudo systemctl enable --now ${unitName}`
-  )
-  showToast(`已生成 ${unitPath} 并重载守护进程启动服务！`)
+function closeConfirmDialog() {
+  confirmDialogRef.value?.close()
+  pendingAction.value = null
+}
+
+async function confirmServiceAction() {
+  if (!pendingAction.value) return
+  const { service, action } = pendingAction.value
+  closeConfirmDialog()
+  await controlSystemdService(service.name, action, useSudo.value)
+}
+
+function refreshServices() {
+  if (!store.activeHostId) return
+  void inspectHost(store.activeHostId)
 }
 </script>
 
@@ -99,54 +71,112 @@ function createNewSystemdService() {
   <div class="p-5 h-full flex flex-col lg:flex-row gap-4 overflow-y-auto">
     <!-- 左侧：Systemd 服务列表 -->
     <div class="lg:w-5/12 bg-slate-900/90 border border-slate-800 rounded-xl flex flex-col overflow-hidden shrink-0">
-      <div class="p-3.5 border-b border-slate-800 flex items-center justify-between">
+      <div class="p-3.5 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
         <div class="flex items-center gap-2 text-xs font-bold text-slate-100">
           <Cog class="w-4 h-4 text-indigo-400" />
           <span>Systemd 系统服务</span>
         </div>
 
-        <div class="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px]">
+        <div class="flex items-center gap-2">
+          <label
+            class="flex items-center gap-1.5 text-[11px] text-slate-300 cursor-pointer select-none px-2 py-0.5 rounded bg-slate-950 border border-slate-800"
+            title="默认关闭；勾选后使用 sudo -n 执行 systemctl 启停/重启"
+          >
+            <input
+              v-model="useSudo"
+              type="checkbox"
+              class="rounded border-slate-600 bg-slate-900 text-cyan-500 focus:ring-cyan-500/40"
+            />
+            <span>sudo</span>
+          </label>
+
           <button
             type="button"
-            @click="stateFilter = 'ALL'"
-            :class="[
-              'px-2 py-0.5 rounded cursor-pointer',
-              stateFilter === 'ALL' ? 'bg-slate-800 text-slate-100' : 'text-slate-400'
-            ]"
+            @click="refreshServices"
+            :disabled="store.systemdServicesLoading || !store.activeHostId"
+            title="刷新服务列表"
+            class="p-1 rounded bg-slate-950 border border-slate-800 text-slate-400 hover:text-slate-200 disabled:opacity-40 cursor-pointer"
           >
-            全部 ({{ store.systemdServices.length }})
+            <RefreshCw :class="['w-3.5 h-3.5', store.systemdServicesLoading ? 'animate-spin' : '']" />
           </button>
-          <button
-            type="button"
-            @click="stateFilter = 'running'"
-            :class="[
-              'px-2 py-0.5 rounded cursor-pointer',
-              stateFilter === 'running' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400'
-            ]"
-          >
-            运行中
-          </button>
-          <button
-            type="button"
-            @click="stateFilter = 'failed'"
-            :class="[
-              'px-2 py-0.5 rounded cursor-pointer',
-              stateFilter === 'failed' ? 'bg-rose-500/20 text-rose-300' : 'text-slate-400'
-            ]"
-          >
-            异常退出
-          </button>
+
+          <div class="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800 text-[11px]">
+            <button
+              type="button"
+              @click="stateFilter = 'ALL'"
+              :class="[
+                'px-2 py-0.5 rounded cursor-pointer',
+                stateFilter === 'ALL' ? 'bg-slate-800 text-slate-100' : 'text-slate-400'
+              ]"
+            >
+              全部 ({{ store.systemdServices.length }})
+            </button>
+            <button
+              type="button"
+              @click="stateFilter = 'running'"
+              :class="[
+                'px-2 py-0.5 rounded cursor-pointer',
+                stateFilter === 'running' ? 'bg-emerald-500/20 text-emerald-300' : 'text-slate-400'
+              ]"
+            >
+              运行中
+            </button>
+            <button
+              type="button"
+              @click="stateFilter = 'failed'"
+              :class="[
+                'px-2 py-0.5 rounded cursor-pointer',
+                stateFilter === 'failed' ? 'bg-rose-500/20 text-rose-300' : 'text-slate-400'
+              ]"
+            >
+              异常退出
+            </button>
+          </div>
         </div>
       </div>
 
       <div class="flex-1 overflow-y-auto divide-y divide-slate-800/70">
         <div
+          v-if="store.systemdServicesLoading && store.systemdServices.length === 0"
+          class="p-6 flex items-center justify-center gap-2 text-xs text-slate-400"
+        >
+          <Loader2 class="w-4 h-4 animate-spin text-cyan-400" />
+          <span>正在读取当前服务器的系统服务…</span>
+        </div>
+
+        <div
+          v-else-if="store.systemdServicesError && store.systemdServices.length === 0"
+          class="p-6 text-center space-y-2"
+        >
+          <p class="text-xs text-rose-300">{{ store.systemdServicesError }}</p>
+          <button
+            type="button"
+            @click="refreshServices"
+            class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 cursor-pointer"
+          >
+            重试
+          </button>
+        </div>
+
+        <div
+          v-else-if="filteredServices.length === 0"
+          class="p-6 text-center text-xs text-slate-400"
+        >
+          {{ store.systemdServices.length === 0 ? '当前服务器未发现 Systemd 服务或不支持 systemctl' : '当前筛选条件下无匹配服务' }}
+        </div>
+
+        <div
           v-for="svc in filteredServices"
+          v-else
           :key="svc.name"
-          @click="selectedService = svc"
+          tabindex="0"
+          role="button"
+          @click="selectedServiceName = svc.name"
+          @keydown.enter="selectedServiceName = svc.name"
+          @keydown.space.prevent="selectedServiceName = svc.name"
           :class="[
-            'p-3.5 cursor-pointer transition space-y-2',
-            selectedService.name === svc.name || store.lastJumpContext?.filterService === svc.name
+            'p-3.5 cursor-pointer transition space-y-2 focus:outline-none focus:ring-1 focus:ring-indigo-400/60',
+            selectedService?.name === svc.name || store.lastJumpContext?.filterService === svc.name
               ? 'bg-indigo-500/10 border-l-2 border-indigo-400'
               : 'hover:bg-slate-800/50'
           ]"
@@ -187,26 +217,32 @@ function createNewSystemdService() {
             <div class="flex items-center gap-1" @click.stop>
               <button
                 type="button"
-                @click="controlService(svc, 'restart')"
-                class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 cursor-pointer"
+                :disabled="Boolean(serviceAction(svc.name))"
+                @click="handleActionClick(svc, 'restart')"
+                class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 disabled:opacity-40 cursor-pointer"
               >
-                重启
+                <Loader2 v-if="serviceAction(svc.name) === 'restart'" class="w-3 h-3 animate-spin" />
+                <span>重启</span>
               </button>
               <button
                 v-if="svc.state === 'running'"
                 type="button"
-                @click="controlService(svc, 'stop')"
-                class="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 cursor-pointer"
+                :disabled="Boolean(serviceAction(svc.name))"
+                @click="handleActionClick(svc, 'stop')"
+                class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 disabled:opacity-40 cursor-pointer"
               >
-                停止
+                <Loader2 v-if="serviceAction(svc.name) === 'stop'" class="w-3 h-3 animate-spin" />
+                <span>停止</span>
               </button>
               <button
                 v-else
                 type="button"
-                @click="controlService(svc, 'start')"
-                class="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer"
+                :disabled="Boolean(serviceAction(svc.name))"
+                @click="handleActionClick(svc, 'start')"
+                class="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-40 cursor-pointer"
               >
-                启动
+                <Loader2 v-if="serviceAction(svc.name) === 'start'" class="w-3 h-3 animate-spin" />
+                <span>启动</span>
               </button>
             </div>
           </div>
@@ -214,10 +250,17 @@ function createNewSystemdService() {
       </div>
     </div>
 
-    <!-- 右侧：服务详情 + Journalctl 实时日志 + 新建自定义服务可视化向导 -->
+    <!-- 右侧：服务详情与操作 -->
     <div class="flex-1 flex flex-col gap-4 min-w-0">
-      <!-- 1. 选中服务详情与 Journalctl 实时日志流 -->
-      <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-3">
+      <div
+        v-if="!selectedService"
+        class="bg-slate-900/90 border border-slate-800 rounded-xl p-8 flex flex-col items-center justify-center text-center gap-2 text-slate-400 min-h-[240px]"
+      >
+        <Cog class="w-6 h-6 text-slate-500" />
+        <p class="text-xs">请从左侧列表选择一个系统服务以查看详情与执行启停操作</p>
+      </div>
+
+      <div v-else class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-3">
           <div>
             <h2 class="text-sm font-bold text-slate-100 font-mono">{{ selectedService.name }}</h2>
@@ -240,52 +283,52 @@ function createNewSystemdService() {
               <FolderOpen class="w-3.5 h-3.5" />
               <span>{{ selectedService.workingDir }}</span>
             </button>
-
-            <button
-              type="button"
-              @click="openFileInEditor(selectedService.unitFilePath, selectedService.name)"
-              class="flex items-center gap-1.5 px-3 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer"
-            >
-              <FileCode2 class="w-3.5 h-3.5" />
-              <span>编辑 Unit 配置文件</span>
-            </button>
           </div>
         </div>
 
         <div class="space-y-1.5">
           <div class="flex items-center justify-between text-xs">
             <span class="font-mono text-slate-400">
-              实时日志流: <code class="text-cyan-300">journalctl -u {{ selectedService.name }} -f</code>
+              Unit 路径: <code class="text-cyan-300">{{ selectedService.unitFilePath }}</code>
             </span>
             <div class="flex items-center gap-1.5">
               <button
                 type="button"
-                @click="controlService(selectedService, 'restart')"
-                class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 cursor-pointer"
+                :disabled="Boolean(serviceAction(selectedService.name))"
+                @click="handleActionClick(selectedService, 'restart')"
+                class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 disabled:opacity-40 cursor-pointer"
               >
-                <RotateCw class="w-3 h-3" />
+                <Loader2 v-if="serviceAction(selectedService.name) === 'restart'" class="w-3 h-3 animate-spin" />
+                <RotateCw v-else class="w-3 h-3" />
                 <span>Restart</span>
               </button>
               <button
                 type="button"
-                @click="controlService(selectedService, 'stop')"
-                class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-xs text-rose-300 cursor-pointer"
+                :disabled="Boolean(serviceAction(selectedService.name))"
+                @click="handleActionClick(selectedService, 'stop')"
+                class="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-xs text-rose-300 disabled:opacity-40 cursor-pointer"
               >
-                <Square class="w-3 h-3" />
+                <Loader2 v-if="serviceAction(selectedService.name) === 'stop'" class="w-3 h-3 animate-spin" />
+                <Square v-else class="w-3 h-3" />
                 <span>Stop</span>
               </button>
               <button
                 type="button"
-                @click="controlService(selectedService, 'start')"
-                class="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-xs text-white cursor-pointer"
+                :disabled="Boolean(serviceAction(selectedService.name))"
+                @click="handleActionClick(selectedService, 'start')"
+                class="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-xs text-white disabled:opacity-40 cursor-pointer"
               >
-                <Play class="w-3 h-3" />
+                <Loader2 v-if="serviceAction(selectedService.name) === 'start'" class="w-3 h-3 animate-spin" />
+                <Play v-else class="w-3 h-3" />
                 <span>Start</span>
               </button>
             </div>
           </div>
 
-          <div class="p-3 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[11px] space-y-1 max-h-36 overflow-y-auto">
+          <div
+            v-if="selectedService.recentLogs.length > 0"
+            class="p-3 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[11px] space-y-1 max-h-48 overflow-y-auto"
+          >
             <div
               v-for="(line, i) in selectedService.recentLogs"
               :key="i"
@@ -294,61 +337,55 @@ function createNewSystemdService() {
               {{ line }}
             </div>
           </div>
-        </div>
-      </div>
-
-      <!-- 2. 可视化新建 Systemd 服务向导 (自动生成 .service 文件并预览底层指令) -->
-      <div class="bg-slate-900/90 border border-slate-800 rounded-xl p-4 space-y-3">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2 text-xs font-bold text-slate-100">
-            <Plus class="w-4 h-4 text-cyan-400" />
-            <span>新建自定义 Systemd 守护进程向导 (免手写 Unit 语法)</span>
-          </div>
-          <span class="text-[11px] font-mono text-slate-400">自动执行 daemon-reload</span>
-        </div>
-
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-          <div class="space-y-2">
-            <div>
-              <label class="text-slate-400 block mb-1">服务名称 (.service)</label>
-              <input
-                v-model="newSvcForm.name"
-                type="text"
-                class="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 font-mono text-slate-100"
-              />
-            </div>
-            <div>
-              <label class="text-slate-400 block mb-1">工作目录 (WorkingDirectory)</label>
-              <input
-                v-model="newSvcForm.workingDir"
-                type="text"
-                class="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 font-mono text-amber-300"
-              />
-            </div>
-            <div>
-              <label class="text-slate-400 block mb-1">启动命令 (ExecStart)</label>
-              <input
-                v-model="newSvcForm.execStart"
-                type="text"
-                class="w-full px-2.5 py-1.5 rounded bg-slate-950 border border-slate-700 font-mono text-cyan-300"
-              />
-            </div>
-          </div>
-
-          <div class="flex flex-col justify-between">
-            <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 font-mono text-[10px] text-slate-300 whitespace-pre-wrap leading-relaxed">{{ generatedUnitContent }}</div>
-
-            <button
-              type="button"
-              @click="createNewSystemdService"
-              class="mt-2 w-full py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
-            >
-              <Terminal class="w-3.5 h-3.5" />
-              <span>生成 Unit 文件、重载 Daemon 并立即启动</span>
-            </button>
+          <div
+            v-else
+            class="p-3 rounded-lg bg-slate-950 border border-slate-800 text-xs text-slate-400"
+          >
+            当前服务暂无采集日志，可在终端执行 <code class="font-mono text-cyan-300">journalctl -u {{ selectedService.name }} -n 50</code> 查看。
           </div>
         </div>
       </div>
     </div>
+
+    <!-- 停止/重启服务确认对话框 -->
+    <dialog
+      ref="confirmDialogRef"
+      closedby="any"
+      @close="pendingAction = null"
+      class="m-auto w-full max-w-md rounded-xl bg-slate-900 text-slate-100 border border-slate-700 shadow-2xl p-5 backdrop:bg-slate-950/75"
+    >
+      <div v-if="pendingAction" class="space-y-4">
+        <div class="flex items-center gap-2 text-sm font-bold text-slate-100">
+          <ShieldAlert class="w-4 h-4 text-amber-400 shrink-0" />
+          <span>确认{{ pendingAction.action === 'stop' ? '停止' : '重启' }}服务</span>
+        </div>
+        <p class="text-xs text-slate-300 leading-relaxed">
+          将在远端服务器执行
+          <code class="px-1.5 py-0.5 rounded bg-slate-950 border border-slate-800 font-mono text-cyan-300">
+            {{ useSudo ? 'sudo -n ' : '' }}systemctl {{ pendingAction.action }} -- {{ pendingAction.service.name }}
+          </code>
+          。确定继续吗？
+        </p>
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            @click="closeConfirmDialog"
+            class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 cursor-pointer"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            @click="confirmServiceAction"
+            :class="[
+              'px-3 py-1.5 rounded-lg text-xs font-semibold text-white cursor-pointer',
+              pendingAction.action === 'stop' ? 'bg-rose-600 hover:bg-rose-500' : 'bg-cyan-600 hover:bg-cyan-500'
+            ]"
+          >
+            确认{{ pendingAction.action === 'stop' ? '停止' : '重启' }}
+          </button>
+        </div>
+      </div>
+    </dialog>
   </div>
 </template>

@@ -5,11 +5,17 @@ import json
 import base64
 import shlex
 import asyncio
-from typing import Optional, Dict, Any, List
+import ipaddress
+from typing import Optional, Dict, Any, List, Tuple
 import asyncssh
 
 from ssh_config_parser import find_host_by_alias
-from models import DockerContainerInfo, ProcessSignalPayload
+from models import (
+    DockerContainerInfo,
+    ProcessSignalPayload,
+    FirewallRuleCreatePayload,
+    FirewallRuleDeletePayload,
+)
 from process_manager import PROCESS_LIST_CODE, PROCESS_SIGNAL_CODE
 
 # 远端极简采集脚本，优先 python3，其次 awk/sh
@@ -484,67 +490,96 @@ data['cronTasks'] = crons
 rules = []
 if shutil.which('ufw'):
     ufw_out = run_cmd(['ufw', 'status', 'numbered'], timeout=2)
-    idx = 1
     for line in ufw_out.splitlines():
-        if '[' in line and ']' in line:
-            content = line.split(']', 1)[-1].strip()
-            p_parts = content.split()
-            if len(p_parts) >= 2:
-                port_proto = p_parts[0]
-                act = 'ALLOW' if 'ALLOW' in p_parts[1].upper() else 'DENY'
-                p_num = port_proto.split('/')[0] if '/' in port_proto else port_proto
-                proto = port_proto.split('/')[1] if '/' in port_proto else 'tcp'
-                rules.append({
-                    'id': f'fw-{idx}',
-                    'port': p_num,
-                    'protocol': proto if proto in ['tcp', 'udp'] else 'any',
-                    'sourceCidr': '0.0.0.0/0',
-                    'action': act,
-                    'comment': f'UFW 规则 #{idx}',
-                    'enabled': True
-                })
-                idx += 1
+        m = re.match(r'^\[\s*(\d+)\]\s+(.+?)\s+(ALLOW|DENY|REJECT)\s+(?:IN|OUT|FWD)?\s*(.+)$', line.strip(), re.IGNORECASE)
+        if not m:
+            continue
+        r_num = int(m.group(1))
+        to_part = m.group(2).strip()
+        act_raw = m.group(3).upper()
+        rest_part = m.group(4).strip()
+        comment = f'UFW 规则 #{r_num}'
+        if '#' in rest_part:
+            rest_part, comment_raw = rest_part.split('#', 1)
+            rest_part = rest_part.strip()
+            if comment_raw.strip():
+                comment = comment_raw.strip()
+        is_v6 = '(v6)' in to_part or '(v6)' in rest_part
+        to_clean = to_part.replace('(v6)', '').strip()
+        rest_clean = rest_part.replace('(v6)', '').strip()
+        src_cidr = '::/0' if (is_v6 and rest_clean.lower() == 'anywhere') else ('0.0.0.0/0' if rest_clean.lower() == 'anywhere' or not rest_clean else rest_clean.split()[0])
+        p_num = to_clean.split('/')[0] if '/' in to_clean else to_clean
+        proto = to_clean.split('/')[1].lower() if '/' in to_clean else 'any'
+        if proto not in ('tcp', 'udp'):
+            proto = 'any'
+        rules.append({
+            'id': f'ufw-{r_num}',
+            'ruleNumber': r_num,
+            'backend': 'ufw',
+            'port': p_num,
+            'protocol': proto,
+            'sourceCidr': src_cidr,
+            'action': act_raw if act_raw in ('ALLOW', 'DENY', 'REJECT') else 'DENY',
+            'comment': comment,
+            'enabled': True
+        })
 elif shutil.which('firewall-cmd'):
     fwd_out = run_cmd(['firewall-cmd', '--list-all'], timeout=2)
     idx = 1
     for line in fwd_out.splitlines():
         if 'ports:' in line:
-            # ports: 80/tcp 443/tcp
             p_list = line.split('ports:', 1)[-1].strip().split()
             for p_spec in p_list:
                 p_num = p_spec.split('/')[0] if '/' in p_spec else p_spec
-                proto = p_spec.split('/')[1] if '/' in p_spec else 'tcp'
+                proto = p_spec.split('/')[1].lower() if '/' in p_spec else 'tcp'
                 rules.append({
-                    'id': f'fw-{idx}',
-                    'port': p_num,
+                    'id': f'fwd-{idx}',
+                    'ruleNumber': idx,
+                    'backend': 'firewalld',
+                    'port': p_num.replace('-', ':'),
                     'protocol': proto if proto in ['tcp', 'udp'] else 'any',
                     'sourceCidr': '0.0.0.0/0',
                     'action': 'ALLOW',
-                    'comment': f'firewalld 开放端口',
+                    'comment': 'firewalld 开放端口',
                     'enabled': True
                 })
                 idx += 1
 if not rules and shutil.which('iptables'):
     ipt_out = run_cmd(['iptables', '-S', 'INPUT'], timeout=2)
-    idx = 1
+    rule_idx = 0
     for line in ipt_out.splitlines():
-        if '--dport' in line:
-            parts = line.split()
+        stripped = line.strip()
+        if not stripped.startswith('-A INPUT'):
+            continue
+        rule_idx += 1
+        if '--dport' in stripped:
+            parts = stripped.split()
             p_num = 'any'
             proto = 'tcp'
-            if '-p' in parts: proto = parts[parts.index('-p') + 1]
-            if '--dport' in parts: p_num = parts[parts.index('--dport') + 1]
-            act = 'ALLOW' if '-j ACCEPT' in line else 'DENY'
+            src_cidr = '0.0.0.0/0'
+            if '-p' in parts and parts.index('-p') + 1 < len(parts):
+                proto = parts[parts.index('-p') + 1].lower()
+            if '--dport' in parts and parts.index('--dport') + 1 < len(parts):
+                p_num = parts[parts.index('--dport') + 1]
+            if '-s' in parts and parts.index('-s') + 1 < len(parts):
+                src_cidr = parts[parts.index('-s') + 1]
+            if '-j ACCEPT' in stripped:
+                act = 'ALLOW'
+            elif '-j REJECT' in stripped:
+                act = 'REJECT'
+            else:
+                act = 'DENY'
             rules.append({
-                'id': f'fw-{idx}',
+                'id': f'ipt-{rule_idx}',
+                'ruleNumber': rule_idx,
+                'backend': 'iptables',
                 'port': p_num,
                 'protocol': proto if proto in ['tcp', 'udp'] else 'any',
-                'sourceCidr': '0.0.0.0/0',
+                'sourceCidr': src_cidr,
                 'action': act,
-                'comment': f'iptables INPUT 规则 #{idx}',
+                'comment': f'iptables INPUT 规则 #{rule_idx}',
                 'enabled': True
             })
-            idx += 1
 data['firewallRules'] = rules
 
 # 6. 当前用户家目录或 /root 下的文件列表 (Files)
@@ -1110,6 +1145,178 @@ except Exception as error:
             return {"status": "ok", "container": container, "action": action, "message": f"已{label}容器 {container}", "exit_code": 0}
         except Exception as exc:
             return {"status": "error", "message": f"未能确认{label}结果：{exc}；请刷新容器状态后再操作"}
+
+    async def control_systemd_service(self, host_alias: str, service: str, action: str, sudo: bool = False) -> Dict[str, Any]:
+        action_labels = {"start": "启动", "stop": "停止", "restart": "重启"}
+        if action not in action_labels:
+            return {"status": "error", "message": "不支持的服务操作"}
+        label = action_labels[action]
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9@_.:-]*", service or "") or ".." in service:
+            return {"status": "error", "message": "非法 Systemd 服务名称"}
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return {"status": "error", "error_type": err_type, "message": err_msg or "无法建立 SSH 连接"}
+        command = ("sudo -n " if sudo else "") + f"systemctl {action} -- {shlex.quote(service)}"
+        try:
+            result = await conn.run(command, timeout=45)
+            if result.exit_status != 0:
+                return {"status": "error", "message": (result.stderr or result.stdout or f"服务{label}失败").strip(), "exit_code": result.exit_status}
+            return {"status": "ok", "service": service, "action": action, "message": f"已{label}服务 {service}", "exit_code": 0}
+        except Exception as exc:
+            return {"status": "error", "message": f"未能确认{label}结果：{exc}；请刷新服务状态后再操作"}
+
+    @staticmethod
+    def _validate_firewall_port(raw_port: str) -> Tuple[Optional[str], Optional[str]]:
+        p = (raw_port or "").strip()
+        if not p:
+            return None, "端口不能为空"
+        m = re.fullmatch(r"(\d{1,5})(?:[:\-](\d{1,5}))?", p)
+        if not m:
+            return None, "端口格式非法，仅支持单端口 (如 8080) 或端口段 (如 8000:8010)"
+        start = int(m.group(1))
+        if not (1 <= start <= 65535):
+            return None, "端口号必须在 1~65535 之间"
+        if m.group(2) is not None:
+            end = int(m.group(2))
+            if not (1 <= end <= 65535) or start >= end:
+                return None, "端口段范围非法，需满足 1 <= 起始端口 < 结束端口 <= 65535"
+            return f"{start}:{end}", None
+        return str(start), None
+
+    @staticmethod
+    def _validate_firewall_source(raw_source: str) -> Tuple[Optional[str], Optional[str]]:
+        s = (raw_source or "").strip()
+        if not s or s.lower() in ("any", "anywhere", "0.0.0.0/0"):
+            return "0.0.0.0/0", None
+        try:
+            net = ipaddress.ip_network(s, strict=False)
+            return str(net), None
+        except ValueError:
+            return None, "来源 IP / CIDR 格式非法（示例：0.0.0.0/0 或 192.168.1.0/24）"
+
+    async def _resolve_firewall_backend(self, conn: Any, preferred: Optional[str]) -> Optional[str]:
+        if preferred in ("ufw", "firewalld", "iptables"):
+            return preferred
+        detect_cmd = (
+            "if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then echo firewalld; "
+            "elif command -v ufw >/dev/null 2>&1 && systemctl is-active --quiet ufw 2>/dev/null; then echo ufw; "
+            "elif command -v ufw >/dev/null 2>&1; then echo ufw; "
+            "elif command -v firewall-cmd >/dev/null 2>&1; then echo firewalld; "
+            "elif command -v iptables >/dev/null 2>&1; then echo iptables; fi"
+        )
+        res = await conn.run(detect_cmd, timeout=5)
+        detected = (res.stdout or "").strip().splitlines()[0].strip() if (res.stdout or "").strip() else ""
+        return detected if detected in ("ufw", "firewalld", "iptables") else None
+
+    async def create_firewall_rule(self, host_alias: str, payload: FirewallRuleCreatePayload) -> Dict[str, Any]:
+        port_norm, port_err = self._validate_firewall_port(payload.port)
+        if port_err or not port_norm:
+            return {"status": "error", "message": port_err or "端口非法"}
+        source_norm, src_err = self._validate_firewall_source(payload.sourceCidr)
+        if src_err or not source_norm:
+            return {"status": "error", "message": src_err or "来源网段非法"}
+
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return {"status": "error", "error_type": err_type, "message": err_msg or "无法建立 SSH 连接"}
+
+        backend = await self._resolve_firewall_backend(conn, payload.backend)
+        if not backend:
+            return {"status": "error", "message": "未在目标主机检测到可用的 ufw / firewalld / iptables"}
+
+        prefix = "sudo -n " if payload.sudo else ""
+        if backend == "ufw":
+            verb = {"ALLOW": "allow", "DENY": "deny", "REJECT": "reject"}[payload.action]
+            from_arg = "any" if source_norm in ("0.0.0.0/0", "::/0") else source_norm
+            proto_part = f" proto {payload.protocol}" if payload.protocol in ("tcp", "udp") else ""
+            comment_clean = re.sub(r"[\r\n\x00-\x1f]", " ", payload.comment or "").strip()[:64]
+            comment_part = f" comment {shlex.quote(comment_clean)}" if comment_clean else ""
+            cmd = f"{prefix}ufw {verb} from {shlex.quote(from_arg)} to any port {shlex.quote(port_norm)}{proto_part}{comment_part}"
+        elif backend == "firewalld":
+            if payload.action != "ALLOW":
+                return {"status": "error", "message": "firewalld 基础端口规则仅支持 ALLOW 放行；如需拦截请使用 ufw/iptables"}
+            if source_norm not in ("0.0.0.0/0", "::/0"):
+                return {"status": "error", "message": "firewalld 基础端口规则暂不支持限制来源 IP/CIDR，请使用 0.0.0.0/0"}
+            port_fwd = port_norm.replace(":", "-")
+            protos = ["tcp", "udp"] if payload.protocol == "any" else [payload.protocol]
+            add_cmds = " && ".join(f"{prefix}firewall-cmd --permanent --add-port={shlex.quote(f'{port_fwd}/{p}')}" for p in protos)
+            cmd = f"{add_cmds} && {prefix}firewall-cmd --reload"
+        else:
+            target = {"ALLOW": "ACCEPT", "DENY": "DROP", "REJECT": "REJECT"}[payload.action]
+            protos = ["tcp", "udp"] if payload.protocol == "any" else [payload.protocol]
+            src_part = f"-s {shlex.quote(source_norm)} " if source_norm not in ("0.0.0.0/0", "::/0") else ""
+            cmd = " && ".join(
+                f"{prefix}iptables -A INPUT -p {p} --dport {shlex.quote(port_norm)} {src_part}-j {target}"
+                for p in protos
+            )
+
+        try:
+            result = await conn.run(cmd, timeout=20)
+            if result.exit_status != 0:
+                detail = (result.stderr or result.stdout or "防火墙规则添加失败").strip()
+                return {"status": "error", "backend": backend, "message": detail, "exit_code": result.exit_status}
+            return {
+                "status": "ok",
+                "backend": backend,
+                "command": cmd,
+                "message": f"已在 {backend.upper()} 中应用规则 ({payload.action} {port_norm}/{payload.protocol.upper()})",
+                "exit_code": 0,
+            }
+        except Exception as exc:
+            return {"status": "error", "backend": backend, "message": f"添加防火墙规则超时或异常：{exc}"}
+
+    async def delete_firewall_rule(self, host_alias: str, payload: FirewallRuleDeletePayload) -> Dict[str, Any]:
+        port_norm, port_err = self._validate_firewall_port(payload.port)
+        if port_err or not port_norm:
+            return {"status": "error", "message": port_err or "端口非法"}
+        source_norm, src_err = self._validate_firewall_source(payload.sourceCidr)
+        if src_err or not source_norm:
+            return {"status": "error", "message": src_err or "来源网段非法"}
+
+        conn, err_type, err_msg = await self._get_connection(host_alias)
+        if not conn:
+            return {"status": "error", "error_type": err_type, "message": err_msg or "无法建立 SSH 连接"}
+
+        backend = await self._resolve_firewall_backend(conn, payload.backend)
+        if not backend:
+            return {"status": "error", "message": "未在目标主机检测到可用的 ufw / firewalld / iptables"}
+
+        prefix = "sudo -n " if payload.sudo else ""
+        if backend == "ufw":
+            if payload.ruleNumber is None or payload.ruleNumber < 1:
+                return {"status": "error", "message": "缺少 UFW 规则编号，请先刷新规则列表后重试"}
+            cmd = f"{prefix}ufw --force delete {int(payload.ruleNumber)}"
+        elif backend == "firewalld":
+            port_fwd = port_norm.replace(":", "-")
+            protos = ["tcp", "udp"] if payload.protocol == "any" else [payload.protocol]
+            rm_cmds = " && ".join(f"{prefix}firewall-cmd --permanent --remove-port={shlex.quote(f'{port_fwd}/{p}')}" for p in protos)
+            cmd = f"{rm_cmds} && {prefix}firewall-cmd --reload"
+        else:
+            if payload.ruleNumber is not None and payload.ruleNumber >= 1:
+                cmd = f"{prefix}iptables -D INPUT {int(payload.ruleNumber)}"
+            else:
+                target = {"ALLOW": "ACCEPT", "DENY": "DROP", "REJECT": "REJECT"}[payload.action]
+                protos = ["tcp", "udp"] if payload.protocol == "any" else [payload.protocol]
+                src_part = f"-s {shlex.quote(source_norm)} " if source_norm not in ("0.0.0.0/0", "::/0") else ""
+                cmd = " && ".join(
+                    f"{prefix}iptables -D INPUT -p {p} --dport {shlex.quote(port_norm)} {src_part}-j {target}"
+                    for p in protos
+                )
+
+        try:
+            result = await conn.run(cmd, timeout=20)
+            if result.exit_status != 0:
+                detail = (result.stderr or result.stdout or "防火墙规则删除失败").strip()
+                return {"status": "error", "backend": backend, "message": detail, "exit_code": result.exit_status}
+            return {
+                "status": "ok",
+                "backend": backend,
+                "command": cmd,
+                "message": f"已从 {backend.upper()} 删除端口 {port_norm}/{payload.protocol.upper()} 规则",
+                "exit_code": 0,
+            }
+        except Exception as exc:
+            return {"status": "error", "backend": backend, "message": f"删除防火墙规则超时或异常：{exc}"}
 
     async def remove_docker_container(self, host_alias: str, container: str, force: bool = False, remove_volumes: bool = False) -> Dict[str, Any]:
         """通过单次 SSH 会话删除 Docker 容器（可选强制/同时删除匿名卷）"""

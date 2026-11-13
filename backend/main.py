@@ -13,6 +13,9 @@ from models import (
     TerminalAuthPayload,
     DockerRestartPayload,
     DockerActionPayload,
+    SystemdActionPayload,
+    FirewallRuleCreatePayload,
+    FirewallRuleDeletePayload,
     CronTaskCreatePayload,
     CronTaskEnabledPayload,
     ProcessSignalPayload,
@@ -459,6 +462,27 @@ async def control_docker_container_endpoint(host_alias: str, container: str, pay
     if not find_host_by_alias(host_alias):
         raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
     return await metrics_service.control_docker_container(host_alias, container, payload.action, sudo=payload.sudo)
+
+
+@app.post("/api/v1/ssh/systemd/{host_alias}/services/{service}/action")
+async def control_systemd_service_endpoint(host_alias: str, service: str, payload: SystemdActionPayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.control_systemd_service(host_alias, service, payload.action, sudo=payload.sudo)
+
+
+@app.post("/api/v1/ssh/firewall/{host_alias}/rules")
+async def create_firewall_rule_endpoint(host_alias: str, payload: FirewallRuleCreatePayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.create_firewall_rule(host_alias, payload)
+
+
+@app.post("/api/v1/ssh/firewall/{host_alias}/rules/delete")
+async def delete_firewall_rule_endpoint(host_alias: str, payload: FirewallRuleDeletePayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.delete_firewall_rule(host_alias, payload)
 
 
 @app.websocket("/ws/terminal/{host_alias}")

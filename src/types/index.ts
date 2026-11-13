@@ -177,6 +177,17 @@ export interface SystemdServiceItem {
   recentLogs: string[]
 }
 
+export type SystemdServiceAction = 'start' | 'stop' | 'restart'
+
+export interface SystemdActionResponse {
+  status: 'ok' | 'error'
+  service?: string
+  message?: string
+  detail?: string
+  exit_code?: number
+  action?: SystemdServiceAction
+}
+
 export type DockerContainerAction = 'start' | 'stop' | 'restart'
 
 export interface DockerActionResponse {
@@ -239,6 +250,8 @@ export interface DockerContainerItem {
 
 export interface FirewallRuleItem {
   id: string
+  ruleNumber?: number
+  backend?: 'ufw' | 'firewalld' | 'iptables'
   port: string
   protocol: 'tcp' | 'udp' | 'any'
   sourceCidr: string
@@ -251,6 +264,35 @@ export interface FirewallRuleItem {
     type: 'process' | 'docker'
     targetId?: string
   }
+}
+
+export interface FirewallRuleCreatePayload {
+  port: string
+  protocol: 'tcp' | 'udp' | 'any'
+  sourceCidr: string
+  action: 'ALLOW' | 'DENY' | 'REJECT'
+  comment: string
+  sudo: boolean
+  backend?: 'ufw' | 'firewalld' | 'iptables'
+}
+
+export interface FirewallRuleDeletePayload {
+  port: string
+  protocol: 'tcp' | 'udp' | 'any'
+  sourceCidr: string
+  action: 'ALLOW' | 'DENY' | 'REJECT'
+  ruleNumber?: number
+  backend?: 'ufw' | 'firewalld' | 'iptables'
+  sudo: boolean
+}
+
+export interface FirewallActionResponse {
+  status: 'ok' | 'error'
+  backend?: 'ufw' | 'firewalld' | 'iptables'
+  command?: string
+  message?: string
+  detail?: string
+  exit_code?: number
 }
 
 export interface CrossModuleLinkPayload {

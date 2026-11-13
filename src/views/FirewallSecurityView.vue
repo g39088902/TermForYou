@@ -4,9 +4,12 @@ import {
   store,
   currentHost,
   navigateWithContext,
-  executeTerminalCommand,
+  createFirewallRule,
+  deleteFirewallRule,
+  inspectHost,
   showToast
 } from '@/stores/workbenchStore'
+import type { FirewallRuleItem } from '@/types'
 import {
   Shield,
   ShieldCheck,
@@ -15,8 +18,16 @@ import {
   Plus,
   Star,
   Activity,
-  Container
+  Container,
+  RefreshCw,
+  Trash2,
+  Loader2,
+  AlertTriangle
 } from 'lucide-vue-next'
+
+const useSudo = ref(false)
+const deleteDialogRef = ref<HTMLDialogElement | null>(null)
+const pendingDeleteRule = ref<FirewallRuleItem | null>(null)
 
 const newRule = ref({
   port: store.lastJumpContext?.prefillFirewallPort
@@ -24,7 +35,7 @@ const newRule = ref({
     : '8080',
   protocol: (store.lastJumpContext?.prefillFirewallProtocol ?? 'tcp') as 'tcp' | 'udp' | 'any',
   sourceCidr: '0.0.0.0/0',
-  action: 'ALLOW' as 'ALLOW' | 'DENY',
+  action: 'ALLOW' as 'ALLOW' | 'DENY' | 'REJECT',
   comment: store.lastJumpContext?.prefillFirewallComment ?? 'API Core Public Port'
 })
 
@@ -45,59 +56,118 @@ watch(
   { immediate: true }
 )
 
-// 生成底层透明防火墙 CLI 命令
+// 生成底层透明防火墙 CLI 命令预览
 const underlyingCliPreview = computed(() => {
   const r = newRule.value
-  const actionVerb = r.action === 'ALLOW' ? 'allow' : 'deny'
-  if (currentHost.value.firewallBackend === 'ufw') {
-    const fromPart = r.sourceCidr === '0.0.0.0/0' ? 'any' : r.sourceCidr
-    return `sudo ufw ${actionVerb} from ${fromPart} to any port ${r.port} proto ${r.protocol} comment '${r.comment}'`
+  const prefix = useSudo.value ? 'sudo -n ' : ''
+  const backend = currentHost.value.firewallBackend || 'ufw'
+
+  if (backend === 'ufw') {
+    const actionVerb = r.action === 'ALLOW' ? 'allow' : r.action === 'REJECT' ? 'reject' : 'deny'
+    const fromPart = !r.sourceCidr || r.sourceCidr === '0.0.0.0/0' ? 'any' : r.sourceCidr
+    const protoPart = r.protocol === 'any' ? '' : ` proto ${r.protocol}`
+    const commentPart = r.comment.trim() ? ` comment '${r.comment.trim()}'` : ''
+    return `${prefix}ufw ${actionVerb} from ${fromPart} to any port ${r.port}${protoPart}${commentPart}`
   }
-  if (currentHost.value.firewallBackend === 'firewalld') {
-    if (r.action === 'ALLOW') {
-      return `sudo firewall-cmd --permanent --add-port=${r.port}/${r.protocol} && sudo firewall-cmd --reload`
-    }
-    return `sudo firewall-cmd --permanent --remove-port=${r.port}/${r.protocol} && sudo firewall-cmd --reload`
+
+  if (backend === 'firewalld') {
+    const fwdPort = r.port.replace(':', '-')
+    const protos = r.protocol === 'any' ? ['tcp', 'udp'] : [r.protocol]
+    const cmds = protos.map((p) => `${prefix}firewall-cmd --permanent --add-port=${fwdPort}/${p}`).join(' && ')
+    return `${cmds} && ${prefix}firewall-cmd --reload`
   }
-  return `sudo iptables -A INPUT -p ${r.protocol} --dport ${r.port} -s ${r.sourceCidr} -j ${r.action === 'ALLOW' ? 'ACCEPT' : 'DROP'}`
+
+  const target = r.action === 'ALLOW' ? 'ACCEPT' : r.action === 'REJECT' ? 'REJECT' : 'DROP'
+  const protos = r.protocol === 'any' ? ['tcp', 'udp'] : [r.protocol]
+  const srcPart = r.sourceCidr && r.sourceCidr !== '0.0.0.0/0' ? `-s ${r.sourceCidr} ` : ''
+  return protos.map((p) => `${prefix}iptables -A INPUT -p ${p} --dport ${r.port} ${srcPart}-j ${target}`).join(' && ')
 })
+
+function matchRuleForPort(port: number, protocol: string): boolean | null {
+  const matched = store.firewallRules.filter((r) => {
+    const protoOk = r.protocol === 'any' || r.protocol === protocol
+    if (!protoOk) return false
+    if (r.port.includes(':')) {
+      const [s, e] = r.port.split(':').map(Number)
+      return Number.isInteger(s) && Number.isInteger(e) && port >= s && port <= e
+    }
+    return Number(r.port) === port
+  })
+  if (matched.length === 0) return null
+  if (matched.some((r) => r.action === 'ALLOW')) return true
+  if (matched.some((r) => r.action === 'DENY' || r.action === 'REJECT')) return false
+  return null
+}
 
 // 计算「服务器实际监听端口 vs 防火墙放行规则」全景对照矩阵
 const portComparisonMatrix = computed(() => {
   return store.processes
     .filter((p) => p.listenPort)
-    .map((p) => ({
-      port: p.listenPort!,
-      protocol: p.protocol ?? 'tcp',
-      processName: p.name,
-      pid: p.pid,
-      isDocker: Boolean(p.dockerContainerId),
-      dockerId: p.dockerContainerId,
-      allowed: p.firewallAllowed ?? null
-    }))
+    .map((p) => {
+      const proto = p.protocol ?? 'tcp'
+      const allowed = p.firewallAllowed ?? matchRuleForPort(p.listenPort!, proto)
+      return {
+        port: p.listenPort!,
+        protocol: proto,
+        processName: p.name,
+        pid: p.pid,
+        isDocker: Boolean(p.dockerContainerId),
+        dockerId: p.dockerContainerId,
+        allowed
+      }
+    })
 })
 
-function applyNewFirewallRule() {
-  const portNum = Number(newRule.value.port)
-  const matchingProc = store.processes.find((p) => p.listenPort === portNum)
-  if (matchingProc && newRule.value.action === 'ALLOW') {
-    matchingProc.firewallAllowed = true
+async function applyNewFirewallRule() {
+  if (!newRule.value.port.trim()) {
+    showToast('请输入端口号或端口段')
+    return
   }
-
-  store.firewallRules.unshift({
-    id: `fw-${Date.now()}`,
-    port: newRule.value.port,
+  await createFirewallRule({
+    port: newRule.value.port.trim(),
     protocol: newRule.value.protocol,
-    sourceCidr: newRule.value.sourceCidr,
+    sourceCidr: newRule.value.sourceCidr.trim() || '0.0.0.0/0',
     action: newRule.value.action,
-    comment: newRule.value.comment,
-    enabled: true,
-    listeningProcess: matchingProc
-      ? { pid: matchingProc.pid, name: matchingProc.name, type: 'process' }
-      : undefined
+    comment: newRule.value.comment.trim(),
+    sudo: useSudo.value,
+    backend: currentHost.value.firewallBackend
   })
+}
 
-  executeTerminalCommand(underlyingCliPreview.value)
+async function handleAllowListeningPort(item: { port: number; protocol: string; processName: string }) {
+  newRule.value.port = String(item.port)
+  newRule.value.protocol = (item.protocol === 'udp' ? 'udp' : 'tcp') as 'tcp' | 'udp'
+  newRule.value.action = 'ALLOW'
+  newRule.value.comment = `${item.processName} Port`
+  await applyNewFirewallRule()
+}
+
+function isSshPortRule(rule: FirewallRuleItem): boolean {
+  const sshPort = Number(currentHost.value.port || 22)
+  if (rule.port.includes(':')) {
+    const [s, e] = rule.port.split(':').map(Number)
+    return Number.isInteger(s) && Number.isInteger(e) && sshPort >= s && sshPort <= e
+  }
+  return Number(rule.port) === sshPort
+}
+
+function openDeleteDialog(rule: FirewallRuleItem) {
+  pendingDeleteRule.value = rule
+  deleteDialogRef.value?.showModal()
+}
+
+function closeDeleteDialog() {
+  deleteDialogRef.value?.close()
+  pendingDeleteRule.value = null
+}
+
+async function confirmDeleteRule() {
+  const target = pendingDeleteRule.value
+  if (!target) return
+  const ok = await deleteFirewallRule(target, useSudo.value)
+  if (ok) {
+    closeDeleteDialog()
+  }
 }
 
 function saveFirewallRuleToSnippets() {
@@ -130,8 +200,8 @@ function saveFirewallRuleToSnippets() {
               :class="[
                 'text-[10px] font-mono px-2 py-0.5 rounded-full border flex items-center gap-1',
                 currentHost.firewallEnabled
-                  ? 'bg-emerald-950/60 border-emerald-700/60 text-emerald-300'
-                  : 'bg-rose-950/60 border-rose-700/60 text-rose-300'
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-rose-500/15 border-rose-500/30 text-rose-700 dark:text-rose-300'
               ]"
             >
               <ShieldCheck v-if="currentHost.firewallEnabled" class="w-3 h-3" />
@@ -151,16 +221,32 @@ function saveFirewallRuleToSnippets() {
           </p>
         </div>
 
-        <div class="flex items-center gap-2 px-3 py-1 rounded-lg bg-emerald-950/60 border border-emerald-700/50 text-xs text-emerald-300">
-          <Lock class="w-3.5 h-3.5" />
-          <span>保护规则：当前 SSH 端口 (:{{ currentHost.port }}) 保持锁定放行</span>
+        <div class="flex items-center gap-2">
+          <div class="flex items-center gap-2 px-3 py-1 rounded-lg bg-emerald-950/60 border border-emerald-700/50 text-xs text-emerald-300">
+            <Lock class="w-3.5 h-3.5" />
+            <span>保护规则：当前 SSH 端口 (:{{ currentHost.port }}) 保持锁定放行</span>
+          </div>
+
+          <button
+            type="button"
+            :disabled="!currentHost.id || store.firewallRulesLoading"
+            @click="currentHost.id && inspectHost(currentHost.id)"
+            class="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 text-xs cursor-pointer"
+          >
+            <RefreshCw :class="['w-3.5 h-3.5', store.firewallRulesLoading && 'animate-spin']" />
+            <span>刷新</span>
+          </button>
         </div>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+      <div v-if="portComparisonMatrix.length === 0" class="text-xs text-slate-500 py-3 text-center">
+        暂无监听端口数据，请先探测或刷新当前主机。
+      </div>
+
+      <div v-else class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
         <div
           v-for="item in portComparisonMatrix"
-          :key="item.port"
+          :key="`${item.pid}-${item.port}-${item.protocol}`"
           :class="[
             'p-3 rounded-xl border flex flex-col justify-between gap-2 transition',
             item.allowed
@@ -182,13 +268,15 @@ function saveFirewallRuleToSnippets() {
               :class="[
                 'px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1',
                 item.allowed
-                  ? 'bg-emerald-500/15 text-emerald-300'
-                  : item.allowed === false ? 'bg-amber-500/15 text-amber-800 dark:text-amber-200' : 'bg-slate-500/15 text-slate-600 dark:text-slate-300'
+                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                  : item.allowed === false
+                    ? 'bg-amber-500/15 text-amber-800 dark:text-amber-200'
+                    : 'bg-slate-500/15 text-slate-600 dark:text-slate-300'
               ]"
             >
               <ShieldCheck v-if="item.allowed" class="w-3 h-3" />
               <ShieldAlert v-else class="w-3 h-3" />
-              {{ item.allowed ? '已监听 & 已放行' : item.allowed === false ? '已监听但被拦截' : '已监听 · 放行状态未知' }}
+              {{ item.allowed ? '已监听 & 已放行' : item.allowed === false ? '已监听但被拦截' : '已监听 · 规则未匹配' }}
             </span>
           </div>
 
@@ -212,18 +300,13 @@ function saveFirewallRuleToSnippets() {
             </button>
 
             <button
-              v-if="item.allowed === false"
+              v-if="item.allowed !== true"
               type="button"
-              @click="
-                () => {
-                  newRule.port = String(item.port)
-                  newRule.comment = `${item.processName} Port`
-                  applyNewFirewallRule()
-                }
-              "
-              class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold cursor-pointer"
+              :disabled="store.firewallMutating"
+              @click="handleAllowListeningPort(item)"
+              class="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold cursor-pointer"
             >
-              一键立即放行
+              放行端口
             </button>
           </div>
         </div>
@@ -232,9 +315,20 @@ function saveFirewallRuleToSnippets() {
 
     <!-- 2. 可视化添加防火墙规则 + 底层 CLI 透明预览 -->
     <div class="rounded-xl bg-slate-900/90 border border-cyan-500/30 p-4 space-y-3">
-      <div class="text-xs font-bold text-slate-100 flex items-center gap-2">
-        <Plus class="w-4 h-4 text-cyan-400" />
-        <span>新增入站防火墙规则 (实时生成底层 {{ (currentHost.firewallBackend || 'ufw').toUpperCase() }} 命令)</span>
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="text-xs font-bold text-slate-100 flex items-center gap-2">
+          <Plus class="w-4 h-4 text-cyan-400" />
+          <span>新增入站防火墙规则 (实时生成底层 {{ (currentHost.firewallBackend || 'ufw').toUpperCase() }} 命令)</span>
+        </div>
+
+        <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
+          <input
+            v-model="useSudo"
+            type="checkbox"
+            class="rounded border-slate-600 bg-slate-950 text-cyan-500 focus:ring-cyan-500"
+          />
+          <span>使用 <code class="font-mono text-amber-300">sudo -n</code> 提权执行</span>
+        </label>
       </div>
 
       <div class="grid grid-cols-1 md:grid-cols-5 gap-3 text-xs">
@@ -275,6 +369,7 @@ function saveFirewallRuleToSnippets() {
           >
             <option value="ALLOW">ALLOW (允许入站)</option>
             <option value="DENY">DENY (丢弃拦截)</option>
+            <option value="REJECT">REJECT (拒绝响应)</option>
           </select>
         </div>
         <div>
@@ -289,7 +384,7 @@ function saveFirewallRuleToSnippets() {
 
       <!-- GUI 到底层 CLI 透明映射栏 -->
       <div class="p-2.5 rounded-lg bg-slate-950 border border-slate-800 flex flex-wrap items-center justify-between gap-2">
-        <div class="font-mono text-xs text-slate-400 truncate">
+        <div class="font-mono text-xs text-slate-400 truncate max-w-full">
           <span>[&gt;_ 预览底层命令] </span>
           <span class="text-cyan-300">{{ underlyingCliPreview }}</span>
         </div>
@@ -306,10 +401,12 @@ function saveFirewallRuleToSnippets() {
 
           <button
             type="button"
+            :disabled="store.firewallMutating || !currentHost.id"
             @click="applyNewFirewallRule"
-            class="px-3.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold cursor-pointer"
+            class="flex items-center gap-1.5 px-3.5 py-1 rounded bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
           >
-            立即应用规则
+            <Loader2 v-if="store.firewallMutating" class="w-3.5 h-3.5 animate-spin" />
+            <span>{{ store.firewallMutating ? '应用中...' : '立即应用规则' }}</span>
           </button>
         </div>
       </div>
@@ -317,8 +414,29 @@ function saveFirewallRuleToSnippets() {
 
     <!-- 3. 现有防火墙规则表 -->
     <div class="rounded-xl bg-slate-900/90 border border-slate-800 overflow-hidden">
-      <div tabindex="0" role="region" aria-label="防火墙入站规则列表" class="table-wrapper">
-        <table class="text-left text-xs" style="--label-2: '来源网段'; --label-3: '关联监听进程'; --label-4: '备注'">
+      <div v-if="store.firewallRulesLoading && store.firewallRules.length === 0" class="p-8 text-center text-xs text-slate-400 flex items-center justify-center gap-2">
+        <Loader2 class="w-4 h-4 animate-spin text-cyan-400" />
+        <span>正在读取远端防火墙规则...</span>
+      </div>
+
+      <div v-else-if="store.firewallRulesError && store.firewallRules.length === 0" class="p-8 text-center space-y-2">
+        <p class="text-xs text-rose-400">{{ store.firewallRulesError }}</p>
+        <button
+          type="button"
+          :disabled="!currentHost.id"
+          @click="currentHost.id && inspectHost(currentHost.id)"
+          class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 cursor-pointer"
+        >
+          重试读取
+        </button>
+      </div>
+
+      <div v-else-if="store.firewallRules.length === 0" class="p-8 text-center text-xs text-slate-500">
+        当前主机暂未检测到激活的入站防火墙规则（非 root 用户运行 ufw 时可能需要更高权限查看，或当前防火墙未配置规则）。
+      </div>
+
+      <div v-else tabindex="0" role="region" aria-label="防火墙入站规则列表" class="table-wrapper">
+        <table class="text-left text-xs w-full" style="--label-2: '来源网段'; --label-3: '关联监听进程'; --label-4: '备注'">
           <thead class="bg-slate-950 text-slate-400 text-[11px] border-b border-slate-800">
             <tr>
               <th class="py-2.5 px-3">端口 / 协议</th>
@@ -326,6 +444,7 @@ function saveFirewallRuleToSnippets() {
               <th class="py-2.5 px-3">来源 IP / CIDR</th>
               <th class="py-2.5 px-3">关联监听进程 (点击直达)</th>
               <th class="py-2.5 px-3">规则备注说明</th>
+              <th class="py-2.5 px-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-800/70">
@@ -335,6 +454,7 @@ function saveFirewallRuleToSnippets() {
               class="hover:bg-slate-800/50 transition"
             >
               <th class="py-2.5 px-3 font-mono font-bold text-slate-100">
+                <span v-if="rule.ruleNumber" class="text-slate-500 mr-1.5">#{{ rule.ruleNumber }}</span>
                 {{ rule.port }} / {{ rule.protocol.toUpperCase() }}
               </th>
               <td class="py-2.5 px-3">
@@ -342,8 +462,8 @@ function saveFirewallRuleToSnippets() {
                   :class="[
                     'px-2 py-0.5 rounded font-mono text-[10px] font-bold',
                     rule.action === 'ALLOW'
-                      ? 'bg-emerald-500/15 text-emerald-300'
-                      : 'bg-rose-500/20 text-rose-300'
+                      ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300'
+                      : 'bg-rose-500/15 text-rose-700 dark:text-rose-300'
                   ]"
                 >
                   {{ rule.action }}
@@ -378,10 +498,73 @@ function saveFirewallRuleToSnippets() {
                 </span>
               </td>
               <td class="py-2.5 px-3 text-slate-300">{{ rule.comment }}</td>
+              <td class="py-2.5 px-3 text-right">
+                <button
+                  type="button"
+                  :disabled="store.firewallDeletingId === rule.id"
+                  @click="openDeleteDialog(rule)"
+                  class="inline-flex items-center gap-1 px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 disabled:opacity-50 text-rose-700 dark:text-rose-300 text-[11px] font-medium cursor-pointer"
+                >
+                  <Loader2 v-if="store.firewallDeletingId === rule.id" class="w-3 h-3 animate-spin" />
+                  <Trash2 v-else class="w-3 h-3" />
+                  <span>删除</span>
+                </button>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
+
+    <!-- 删除确认弹窗 -->
+    <dialog
+      ref="deleteDialogRef"
+      class="rounded-xl bg-slate-900 border border-slate-700 text-slate-100 p-0 backdrop:bg-slate-950/75 max-w-md w-full m-auto shadow-2xl"
+      @cancel.prevent="closeDeleteDialog"
+    >
+      <div v-if="pendingDeleteRule" class="p-5 space-y-4">
+        <div class="flex items-start gap-3">
+          <div class="p-2 rounded-lg bg-rose-500/15 text-rose-400 shrink-0">
+            <AlertTriangle class="w-5 h-5" />
+          </div>
+          <div class="space-y-1">
+            <h3 class="text-sm font-bold text-slate-100">确认删除防火墙规则？</h3>
+            <p class="text-xs text-slate-400">
+              将从目标主机 ({{ (pendingDeleteRule.backend || currentHost.firewallBackend || 'firewall').toUpperCase() }}) 永久移除以下规则：
+            </p>
+            <div class="mt-2 p-2.5 rounded-lg bg-slate-950 border border-slate-800 font-mono text-xs text-slate-200">
+              {{ pendingDeleteRule.action }} {{ pendingDeleteRule.port }}/{{ pendingDeleteRule.protocol.toUpperCase() }}
+              <span class="text-slate-400">from</span> {{ pendingDeleteRule.sourceCidr }}
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-if="isSshPortRule(pendingDeleteRule)"
+          class="p-2.5 rounded-lg bg-amber-500/15 border border-amber-500/40 text-xs text-amber-800 dark:text-amber-200"
+        >
+          警告：该规则涉及当前主机 SSH 管理端口 (:{{ currentHost.port }})，删除后若无其他放行规则可能导致当前 SSH 连接中断或无法重连！
+        </div>
+
+        <div class="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            @click="closeDeleteDialog"
+            class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 cursor-pointer"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            :disabled="store.firewallDeletingId === pendingDeleteRule.id"
+            @click="confirmDeleteRule"
+            class="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-xs font-semibold text-white cursor-pointer"
+          >
+            <Loader2 v-if="store.firewallDeletingId === pendingDeleteRule.id" class="w-3.5 h-3.5 animate-spin" />
+            <span>确认删除</span>
+          </button>
+        </div>
+      </div>
+    </dialog>
   </div>
 </template>
