@@ -38,6 +38,13 @@ class DockerRestartPayload(BaseModel):
 class DockerActionPayload(DockerRestartPayload):
     action: Literal["start", "stop"]
 
+class DockerCheckUpdatePayload(BaseModel):
+    container: Optional[str] = Field(default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    sudo: bool = False
+
+class DockerUpdatePayload(BaseModel):
+    sudo: bool = False
+
 class SystemdActionPayload(BaseModel):
     action: Literal["start", "stop", "restart"]
     sudo: bool = False

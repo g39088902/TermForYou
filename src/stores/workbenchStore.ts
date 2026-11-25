@@ -17,6 +17,9 @@ import type {
   DockerContainerItem,
   DockerActionResponse,
   DockerContainerAction,
+  DockerContainerUpdateInfo,
+  DockerCheckUpdatesResponse,
+  DockerUpdateResponse,
   FirewallRuleItem,
   FirewallRuleCreatePayload,
   FirewallRuleDeletePayload,
@@ -130,6 +133,8 @@ export const store = reactive({
   dockerContainersLoading: false,
   dockerContainersError: '',
   dockerContainerActions: {} as Record<string, DockerContainerAction>,
+  dockerUpdateStatus: {} as Record<string, DockerContainerUpdateInfo>,
+  dockerCheckingAllUpdates: false,
 
   // 防火墙规则列表
   firewallRules: [] as FirewallRuleItem[],
@@ -768,7 +773,7 @@ export async function restartDockerContainer(containerId: string, sudo = false):
   return controlDockerContainer(containerId, 'restart', sudo)
 }
 
-export async function controlDockerContainer(containerId: string, action: DockerContainerAction, sudo = false): Promise<boolean> {
+export async function controlDockerContainer(containerId: string, action: Exclude<DockerContainerAction, 'update'>, sudo = false): Promise<boolean> {
   const hostId = store.activeHostId
   if (!hostId) return false
   const label = { start: '启动', stop: '停止', restart: '重启' }[action]
@@ -791,6 +796,117 @@ export async function controlDockerContainer(containerId: string, action: Docker
     return true
   } catch {
     showToast(`未能确认容器${label}结果，请刷新状态后再操作`)
+    return false
+  } finally {
+    delete store.dockerContainerActions[key]
+  }
+}
+
+export async function checkDockerUpdates(sudo = false, containerId?: string): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+  const targetIds = containerId ? [containerId] : store.dockerContainers.map(c => c.id)
+  if (!targetIds.length) return false
+  if (!containerId) {
+    if (store.dockerCheckingAllUpdates) return false
+    store.dockerCheckingAllUpdates = true
+  }
+  for (const cid of targetIds) {
+    store.dockerUpdateStatus[`${hostId}/${cid}`] = { status: 'checking', message: '正在检查远程镜像摘要…' }
+  }
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/docker/${encodeURIComponent(hostId)}/check-updates`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ container: containerId ?? null, sudo })
+      }
+    )
+    const data: DockerCheckUpdatesResponse = await res.json()
+    if (!res.ok || data.status !== 'ok' || !data.results) {
+      const errMsg = data.message || data.detail || '检查镜像更新失败'
+      for (const cid of targetIds) {
+        store.dockerUpdateStatus[`${hostId}/${cid}`] = { status: 'error', message: errMsg }
+      }
+      if (store.activeHostId === hostId) showToast(`检查更新失败：${errMsg}`)
+      return false
+    }
+    let availableCount = 0
+    let errorCount = 0
+    for (const [cid, info] of Object.entries(data.results)) {
+      store.dockerUpdateStatus[`${hostId}/${cid}`] = info
+      if (info.status === 'update_available') availableCount++
+      else if (info.status === 'error') errorCount++
+    }
+    for (const cid of targetIds) {
+      if (!data.results[cid]) {
+        delete store.dockerUpdateStatus[`${hostId}/${cid}`]
+      }
+    }
+    if (store.activeHostId === hostId) {
+      if (containerId) {
+        const single = data.results[containerId]
+        if (single?.status === 'update_available') showToast('检测到新版本镜像，可点击「一键更新」')
+        else if (single?.status === 'up_to_date') showToast('当前镜像已是最新版本')
+        else if (single?.message) showToast(single.message)
+      } else if (availableCount > 0) {
+        showToast(`检查完成：发现 ${availableCount} 个容器有新版本可用`)
+      } else if (errorCount > 0) {
+        showToast(`检查完成：暂未发现新版本（${errorCount} 个容器检查失败）`)
+      } else {
+        showToast('检查完成：所有容器均为最新版本')
+      }
+    }
+    return true
+  } catch {
+    for (const cid of targetIds) {
+      store.dockerUpdateStatus[`${hostId}/${cid}`] = { status: 'error', message: '请求超时或网络异常' }
+    }
+    if (store.activeHostId === hostId) showToast('检查镜像更新失败，请稍后重试')
+    return false
+  } finally {
+    if (!containerId) store.dockerCheckingAllUpdates = false
+  }
+}
+
+export async function updateDockerContainer(containerId: string, containerName: string, sudo = false): Promise<boolean> {
+  const hostId = store.activeHostId
+  if (!hostId) return false
+  const key = `${hostId}/${containerId}`
+  if (store.dockerContainerActions[key]) return false
+  store.dockerContainerActions[key] = 'update'
+  try {
+    const res = await fetch(
+      `http://127.0.0.1:8000/api/v1/ssh/docker/${encodeURIComponent(hostId)}/containers/${encodeURIComponent(containerId)}/update`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sudo })
+      }
+    )
+    const data: DockerUpdateResponse = await res.json()
+    if (!res.ok || data.status !== 'ok') {
+      showToast(data.message || data.detail || `更新容器 ${containerName} 失败`)
+      return false
+    }
+    if (data.updated && data.newContainerId) {
+      delete store.dockerUpdateStatus[key]
+      store.dockerUpdateStatus[`${hostId}/${data.newContainerId}`] = {
+        status: 'up_to_date',
+        message: '已更新至最新版本'
+      }
+    } else if (data.updated === false) {
+      store.dockerUpdateStatus[key] = {
+        status: 'up_to_date',
+        message: data.message || '当前已是最新版本'
+      }
+    }
+    showToast(data.message || `容器 ${containerName} 已更新至最新镜像`)
+    if (store.activeHostId === hostId) await inspectHost(hostId)
+    return true
+  } catch {
+    showToast(`未能确认容器 ${containerName} 更新结果，请刷新状态后查看`)
     return false
   } finally {
     delete store.dockerContainerActions[key]

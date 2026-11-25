@@ -190,7 +190,7 @@ export interface SystemdActionResponse {
   action?: SystemdServiceAction
 }
 
-export type DockerContainerAction = 'start' | 'stop' | 'restart'
+export type DockerContainerAction = 'start' | 'stop' | 'restart' | 'update'
 
 export interface DockerActionResponse {
   status: 'ok' | 'error'
@@ -199,6 +199,40 @@ export interface DockerActionResponse {
   detail?: string
   exit_code?: number
   action?: DockerContainerAction
+}
+
+export type DockerUpdateCheckStatus =
+  | 'checking'
+  | 'update_available'
+  | 'up_to_date'
+  | 'local_only'
+  | 'pinned'
+  | 'error'
+
+export interface DockerContainerUpdateInfo {
+  status: DockerUpdateCheckStatus
+  currentDigest?: string
+  remoteDigest?: string
+  message?: string
+  checkedAt?: string
+}
+
+export interface DockerCheckUpdatesResponse {
+  status: 'ok' | 'error'
+  results?: Record<string, DockerContainerUpdateInfo>
+  message?: string
+  detail?: string
+}
+
+export interface DockerUpdateResponse {
+  status: 'ok' | 'error'
+  container?: string
+  newContainerId?: string
+  image?: string
+  updated?: boolean
+  rolledBack?: boolean
+  message?: string
+  detail?: string
 }
 
 export interface DockerExecTarget {

@@ -9,6 +9,8 @@ import {
   removeDockerContainer,
   restartDockerContainer,
   controlDockerContainer,
+  checkDockerUpdates,
+  updateDockerContainer,
   inspectHost
 } from '@/stores/workbenchStore'
 import {
@@ -22,13 +24,17 @@ import {
   Square,
   Loader2,
   ChevronDown,
-  X
+  X,
+  RefreshCw,
+  ArrowUpCircle
 } from 'lucide-vue-next'
 
 const dockerSudo = ref(false)
 const execTarget = ref<DockerExecTarget | null>(null)
 const pageScrollEl = ref<HTMLDivElement | null>(null)
 const expandedContainers = ref<Set<string>>(new Set())
+const updateDialogEl = ref<HTMLDialogElement | null>(null)
+const pendingUpdateContainer = ref<DockerContainerItem | null>(null)
 
 function toggleDetails(id: string) {
   if (expandedContainers.value.has(id)) expandedContainers.value.delete(id)
@@ -55,6 +61,8 @@ watch(() => store.activeHostId, () => {
   execTarget.value = null
   dockerSudo.value = false
   expandedContainers.value.clear()
+  if (updateDialogEl.value?.open) updateDialogEl.value.close()
+  pendingUpdateContainer.value = null
 }, { flush: 'sync' })
 
 onMounted(() => {
@@ -69,13 +77,39 @@ function isContainerBusy(containerId: string) {
   return !!containerAction(containerId)
 }
 
+function updateInfo(containerId: string) {
+  return store.dockerUpdateStatus[`${store.activeHostId}/${containerId}`]
+}
+
+function shortDigest(digest?: string) {
+  if (!digest) return '—'
+  return digest.replace(/^sha256:/, '').slice(0, 12)
+}
+
 function containerStateLabel(container: DockerContainerItem) {
   const action = containerAction(container.id)
-  return action ? { start: '启动中…', stop: '停止中…', restart: '重启中…' }[action] : container.status
+  return action ? { start: '启动中…', stop: '停止中…', restart: '重启中…', update: '更新中…' }[action] : container.status
 }
 
 function canStop(container: DockerContainerItem) {
   return container.status === 'running' || container.status === 'restarting'
+}
+
+function openUpdateDialog(container: DockerContainerItem) {
+  pendingUpdateContainer.value = container
+  updateDialogEl.value?.showModal()
+}
+
+function handleUpdateDialogClose() {
+  const dialog = updateDialogEl.value
+  const choice = dialog?.returnValue || ''
+  if (dialog) dialog.returnValue = ''
+  const target = pendingUpdateContainer.value
+  pendingUpdateContainer.value = null
+  if (choice === 'confirm' && target) {
+    if (execTarget.value?.containerId === target.id) execTarget.value = null
+    void updateDockerContainer(target.id, target.name, dockerSudo.value)
+  }
 }
 
 async function toggleContainer(container: DockerContainerItem) {
@@ -144,8 +178,17 @@ async function confirmRemove(name: string, running: boolean) {
         <div class="flex items-center gap-3 text-xs text-slate-300">
           <label class="flex items-center gap-1.5 cursor-pointer">
             <input v-model="dockerSudo" type="checkbox" />
-            使用 sudo 启停 / 重启 / Exec
+            使用 sudo 启停 / 重启 / 更新 / Exec
           </label>
+          <button
+            type="button"
+            :disabled="store.dockerCheckingAllUpdates || store.dockerContainersLoading || store.dockerContainers.length === 0"
+            @click="checkDockerUpdates(dockerSudo)"
+            class="inline-flex items-center gap-1.5 px-3 py-1 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 hover:bg-sky-500/25 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+          >
+            <RefreshCw :class="['w-3.5 h-3.5', store.dockerCheckingAllUpdates ? 'animate-spin' : '']" />
+            <span>{{ store.dockerCheckingAllUpdates ? '检查中…' : '检查更新' }}</span>
+          </button>
           <button type="button" :disabled="store.dockerContainersLoading" @click="inspectHost(store.activeHostId)" class="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-50 cursor-pointer">刷新</button>
         </div>
       </div>
@@ -188,11 +231,70 @@ async function confirmRemove(name: string, running: boolean) {
                   </span>
                 </div>
                 <div class="font-mono text-[11px] text-slate-400 mt-0.5 break-all">{{ c.image }}</div>
-                <button type="button" :aria-label="`${expandedContainers.has(c.id) ? '收起' : '查看'}容器 ${c.name} 参数`" :aria-expanded="expandedContainers.has(c.id)" :aria-controls="`docker-details-${c.id}`"
-                  @click="toggleDetails(c.id)" class="inline-flex items-center gap-1 mt-2 text-sky-300 hover:underline cursor-pointer">
-                  <ChevronDown :class="['w-3 h-3 transition-transform', expandedContainers.has(c.id) ? 'rotate-180' : '']" />
-                  {{ expandedContainers.has(c.id) ? '收起参数' : '查看参数' }}
-                </button>
+                <div v-if="updateInfo(c.id)" class="flex flex-wrap items-center gap-1.5 mt-1.5">
+                  <span
+                    v-if="updateInfo(c.id)?.status === 'checking'"
+                    class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[11px]"
+                  >
+                    <Loader2 class="w-3 h-3 animate-spin" />
+                    检查更新中…
+                  </span>
+                  <template v-else-if="updateInfo(c.id)?.status === 'update_available'">
+                    <span
+                      :title="updateInfo(c.id)?.message || '检测到新版本镜像'"
+                      class="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-200 border border-amber-500/30 text-[11px] font-medium"
+                    >
+                      有新版本
+                    </span>
+                    <button
+                      type="button"
+                      @click="openUpdateDialog(c)"
+                      :disabled="isContainerBusy(c.id) || store.dockerContainersLoading"
+                      :aria-label="`一键更新容器 ${c.name}`"
+                      class="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-[11px] font-medium cursor-pointer"
+                    >
+                      <Loader2 v-if="containerAction(c.id) === 'update'" class="w-3 h-3 animate-spin" />
+                      <ArrowUpCircle v-else class="w-3 h-3" />
+                      <span>{{ containerAction(c.id) === 'update' ? '更新中…' : '一键更新' }}</span>
+                    </button>
+                  </template>
+                  <span
+                    v-else-if="updateInfo(c.id)?.status === 'up_to_date'"
+                    :title="updateInfo(c.id)?.message || '当前已是最新版本'"
+                    class="inline-flex items-center px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[11px]"
+                  >
+                    已是最新
+                  </span>
+                  <span
+                    v-else-if="updateInfo(c.id)?.status === 'local_only' || updateInfo(c.id)?.status === 'pinned'"
+                    :title="updateInfo(c.id)?.message"
+                    class="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 text-[11px]"
+                  >
+                    {{ updateInfo(c.id)?.status === 'local_only' ? '本地镜像' : '固定摘要' }}
+                  </span>
+                  <span
+                    v-else-if="updateInfo(c.id)?.status === 'error'"
+                    :title="updateInfo(c.id)?.message"
+                    class="inline-flex items-center px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300 text-[11px]"
+                  >
+                    检查失败
+                  </span>
+                </div>
+                <div class="flex flex-wrap items-center gap-3 mt-2">
+                  <button type="button" :aria-label="`${expandedContainers.has(c.id) ? '收起' : '查看'}容器 ${c.name} 参数`" :aria-expanded="expandedContainers.has(c.id)" :aria-controls="`docker-details-${c.id}`"
+                    @click="toggleDetails(c.id)" class="inline-flex items-center gap-1 text-sky-300 hover:underline cursor-pointer">
+                    <ChevronDown :class="['w-3 h-3 transition-transform', expandedContainers.has(c.id) ? 'rotate-180' : '']" />
+                    {{ expandedContainers.has(c.id) ? '收起参数' : '查看参数' }}
+                  </button>
+                  <button
+                    type="button"
+                    :disabled="updateInfo(c.id)?.status === 'checking' || isContainerBusy(c.id) || store.dockerContainersLoading"
+                    @click="checkDockerUpdates(dockerSudo, c.id)"
+                    class="inline-flex items-center gap-1 text-slate-400 hover:text-sky-300 disabled:opacity-40 cursor-pointer"
+                  >
+                    {{ updateInfo(c.id) ? '重新检查' : '检查更新' }}
+                  </button>
+                </div>
               </th>
 
               <td class="py-3 px-3 font-mono align-top border-b border-slate-800">
@@ -314,5 +416,60 @@ async function confirmRemove(name: string, running: boolean) {
         </table>
       </div>
     </div>
+
+    <dialog
+      ref="updateDialogEl"
+      aria-labelledby="docker-update-dialog-title"
+      @close="handleUpdateDialogClose"
+      class="m-auto w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5 text-slate-100 shadow-2xl"
+    >
+      <template v-if="pendingUpdateContainer">
+        <h1 id="docker-update-dialog-title" class="text-sm font-bold text-slate-100 flex items-center gap-2">
+          <ArrowUpCircle class="w-4 h-4 text-sky-400" />
+          <span>确认更新容器 {{ pendingUpdateContainer.name }}</span>
+        </h1>
+        <div class="mt-3 space-y-2.5 text-xs text-slate-300">
+          <div class="rounded-lg bg-slate-950 border border-slate-800 p-3 font-mono space-y-1 break-all">
+            <div><span class="text-slate-400">镜像：</span>{{ pendingUpdateContainer.image }}</div>
+            <div v-if="updateInfo(pendingUpdateContainer.id)?.currentDigest || updateInfo(pendingUpdateContainer.id)?.remoteDigest">
+              <span class="text-slate-400">摘要：</span>{{ shortDigest(updateInfo(pendingUpdateContainer.id)?.currentDigest) }} → {{ shortDigest(updateInfo(pendingUpdateContainer.id)?.remoteDigest) }}
+            </div>
+          </div>
+          <p class="leading-relaxed">
+            将拉取最新镜像并重建该容器，自动沿用原容器的<strong>网络配置、端口映射、数据卷挂载、环境变量与重启策略</strong>。更新期间服务会短暂中断，若新容器启动失败将自动回滚至原容器。
+          </p>
+          <p v-if="pendingUpdateContainer.composeProject" class="text-amber-200 bg-amber-500/15 border border-amber-500/30 rounded-lg px-3 py-2">
+            该容器归属 Compose 项目 <span class="font-mono">{{ pendingUpdateContainer.composeProject }}</span>，重建将保留现有运行时配置与标签。
+          </p>
+        </div>
+        <form method="dialog" class="mt-5 flex justify-end gap-2 text-xs">
+          <button
+            value="cancel"
+            autofocus
+            class="px-3 py-1.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 cursor-pointer"
+          >
+            取消
+          </button>
+          <button
+            value="confirm"
+            class="px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-500 text-white font-medium cursor-pointer"
+          >
+            确认更新
+          </button>
+        </form>
+      </template>
+    </dialog>
   </div>
 </template>
+
+<style scoped>
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background: rgb(2 6 23 / 0.65);
+}
+</style>

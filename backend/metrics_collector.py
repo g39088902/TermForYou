@@ -1248,6 +1248,624 @@ except Exception as error:
         except Exception as exc:
             return {"status": "error", "message": f"未能确认{label}结果：{exc}；请刷新容器状态后再操作"}
 
+    async def check_docker_updates(self, host_alias: str, container: Optional[str] = None, sudo: bool = False) -> Dict[str, Any]:
+        """检查主机上单个或全部 Docker 容器是否有新版本镜像可用（仅查摘要，不拉取镜像）"""
+        if container is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container):
+            return {"status": "error", "message": "非法容器名称或 ID"}
+        script = r'''
+import os, sys, re, json, base64, shutil, datetime, subprocess
+from concurrent.futures import ThreadPoolExecutor
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+target = req.get('container')
+now_iso = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+if not shutil.which('docker'):
+    print(json.dumps({'status': 'error', 'message': '远端主机未安装 docker'}))
+    sys.exit(0)
+
+def run_cmd(args, timeout=20, extra_env=None):
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout, env=env)
+        return r.returncode, r.stdout or '', r.stderr or ''
+    except subprocess.TimeoutExpired:
+        return 124, '', '命令执行超时'
+    except Exception as e:
+        return 1, '', str(e)
+
+if target:
+    rc, out, err = run_cmd(['docker', 'inspect', '--', target], timeout=10)
+    if rc != 0:
+        print(json.dumps({'status': 'error', 'message': (err or out or '读取容器信息失败').strip()}))
+        sys.exit(0)
+    containers_raw = json.loads(out)
+else:
+    rc, out, err = run_cmd(['docker', 'ps', '-a', '--no-trunc', '-q'], timeout=10)
+    if rc != 0:
+        print(json.dumps({'status': 'error', 'message': (err or out or '读取容器列表失败').strip()}))
+        sys.exit(0)
+    ids = [x.strip() for x in out.splitlines() if x.strip()][:50]
+    if not ids:
+        print(json.dumps({'status': 'ok', 'results': {}}))
+        sys.exit(0)
+    rc, out, err = run_cmd(['docker', 'inspect', *ids], timeout=15)
+    if rc != 0:
+        print(json.dumps({'status': 'error', 'message': (err or out or '读取容器详情失败').strip()}))
+        sys.exit(0)
+    containers_raw = json.loads(out)
+
+# Batch inspect all referenced local image IDs
+img_ids = sorted({c.get('Image', '') for c in containers_raw if c.get('Image')})
+img_map = {}
+if img_ids:
+    rc, out, _ = run_cmd(['docker', 'image', 'inspect', *img_ids], timeout=15)
+    if rc == 0 and out.strip():
+        try:
+            for im in json.loads(out):
+                if im.get('Id'):
+                    img_map[im['Id']] = im
+        except Exception:
+            pass
+
+def parse_manifest_verbose(text):
+    text = text.strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, list) else [parsed]
+    except Exception:
+        items = []
+        dec = json.JSONDecoder()
+        idx = 0
+        n = len(text)
+        while idx < n:
+            while idx < n and text[idx].isspace():
+                idx += 1
+            if idx >= n:
+                break
+            obj, end = dec.raw_decode(text, idx)
+            if isinstance(obj, list):
+                items.extend(obj)
+            elif isinstance(obj, dict):
+                items.append(obj)
+            idx = end
+        return items
+
+def query_remote(image_ref, local_os, local_arch, local_variant):
+    # Method 1: docker manifest inspect -v (returns config.digest == local Image ID & manifest digest)
+    rc, out, err = run_cmd(
+        ['docker', 'manifest', 'inspect', '-v', image_ref],
+        timeout=20,
+        extra_env={'DOCKER_CLI_EXPERIMENTAL': 'enabled'},
+    )
+    if rc == 0 and out.strip():
+        try:
+            entries = parse_manifest_verbose(out)
+            matched = None
+            for item in entries:
+                plat = (item.get('Descriptor') or {}).get('platform') or {}
+                if plat.get('os') == local_os and plat.get('architecture') == local_arch:
+                    if not local_variant or plat.get('variant', '') == local_variant:
+                        matched = item
+                        break
+            if not matched:
+                for item in entries:
+                    plat = (item.get('Descriptor') or {}).get('platform') or {}
+                    if plat.get('os') == local_os and plat.get('architecture') == local_arch:
+                        matched = item
+                        break
+            if not matched and len(entries) == 1:
+                matched = entries[0]
+            if matched:
+                desc = matched.get('Descriptor') or {}
+                manifest = matched.get('SchemaV2Manifest') or matched.get('OCIManifest') or {}
+                cfg_digest = (manifest.get('config') or {}).get('digest') or ''
+                man_digest = desc.get('digest') or ''
+                if cfg_digest or man_digest:
+                    return {'ok': True, 'configDigest': cfg_digest, 'manifestDigest': man_digest, 'indexDigest': ''}
+        except Exception:
+            pass
+
+    # Method 2: docker buildx imagetools inspect (returns top-level index digest)
+    rc2, out2, err2 = run_cmd(['docker', 'buildx', 'imagetools', 'inspect', image_ref], timeout=20)
+    if rc2 == 0 and out2.strip():
+        m = re.search(r'^\s*Digest:\s*(sha256:[a-f0-9]+)', out2, re.M)
+        if m:
+            return {'ok': True, 'configDigest': '', 'manifestDigest': '', 'indexDigest': m.group(1)}
+
+    return {'ok': False, 'error': (err or err2 or out or out2 or '无法查询远程仓库').strip()}
+
+# Deduplicate remote registry queries by (image_ref, os, arch, variant)
+remote_keys = {}
+pre_results = {}
+to_check = []
+
+for c in containers_raw:
+    cid12 = (c.get('Id') or '')[:12]
+    image_ref = ((c.get('Config') or {}).get('Image') or '').strip()
+    local_image_id = (c.get('Image') or '').strip()
+    if not image_ref:
+        pre_results[cid12] = {'status': 'error', 'message': '无法读取容器镜像名', 'checkedAt': now_iso}
+        continue
+    if '@sha256:' in image_ref or image_ref.startswith('sha256:') or re.fullmatch(r'[0-9a-f]{12,64}', image_ref):
+        pre_results[cid12] = {
+            'status': 'pinned',
+            'currentDigest': local_image_id,
+            'message': '镜像已固定摘要或为裸 ID，无需按标签检查',
+            'checkedAt': now_iso,
+        }
+        continue
+
+    # Check if local tag already points to a newer image ID than what container runs
+    rc_tag, out_tag, _ = run_cmd(['docker', 'image', 'inspect', '--format', '{{.Id}}', image_ref], timeout=5)
+    tag_img_id = out_tag.strip() if rc_tag == 0 else ''
+    if tag_img_id and local_image_id and tag_img_id != local_image_id:
+        pre_results[cid12] = {
+            'status': 'update_available',
+            'currentDigest': local_image_id,
+            'remoteDigest': tag_img_id,
+            'message': '本地已有更新版本的同名镜像，可直接一键更新',
+            'checkedAt': now_iso,
+        }
+        continue
+
+    im = img_map.get(local_image_id) or {}
+    repo_digests = {d.split('@', 1)[1] for d in (im.get('RepoDigests') or []) if '@' in d}
+    local_os = im.get('Os') or 'linux'
+    local_arch = im.get('Architecture') or 'amd64'
+    local_variant = im.get('Variant') or ''
+    qkey = (image_ref, local_os, local_arch, local_variant)
+    remote_keys[qkey] = None
+    to_check.append((cid12, image_ref, local_image_id, repo_digests, qkey))
+
+if remote_keys:
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = {k: pool.submit(query_remote, *k) for k in remote_keys}
+        for k, fut in futs.items():
+            try:
+                remote_keys[k] = fut.result()
+            except Exception as e:
+                remote_keys[k] = {'ok': False, 'error': str(e)}
+
+results = dict(pre_results)
+for cid12, image_ref, local_image_id, repo_digests, qkey in to_check:
+    rem = remote_keys.get(qkey) or {'ok': False, 'error': '查询失败'}
+    if not rem.get('ok'):
+        err_msg = rem.get('error') or '无法连接镜像仓库'
+        low = err_msg.lower()
+        if not repo_digests and ('no such manifest' in low or 'not found' in low or 'manifest unknown' in low or 'denied' in low or 'unauthorized' in low):
+            results[cid12] = {
+                'status': 'local_only',
+                'currentDigest': local_image_id,
+                'message': '本地构建镜像或仓库中无此标签',
+                'checkedAt': now_iso,
+            }
+        else:
+            results[cid12] = {
+                'status': 'error',
+                'currentDigest': local_image_id,
+                'message': err_msg[:200],
+                'checkedAt': now_iso,
+            }
+        continue
+
+    cfg_digest = rem.get('configDigest') or ''
+    man_digest = rem.get('manifestDigest') or ''
+    idx_digest = rem.get('indexDigest') or ''
+    is_same = False
+    if cfg_digest and local_image_id and cfg_digest == local_image_id:
+        is_same = True
+    elif man_digest and man_digest in repo_digests:
+        is_same = True
+    elif idx_digest and idx_digest in repo_digests:
+        is_same = True
+
+    remote_digest = cfg_digest or idx_digest or man_digest
+    if is_same:
+        results[cid12] = {
+            'status': 'up_to_date',
+            'currentDigest': local_image_id,
+            'remoteDigest': remote_digest,
+            'message': '当前已是最新版本',
+            'checkedAt': now_iso,
+        }
+    else:
+        results[cid12] = {
+            'status': 'update_available',
+            'currentDigest': local_image_id,
+            'remoteDigest': remote_digest,
+            'message': '检测到新版本镜像',
+            'checkedAt': now_iso,
+        }
+
+print(json.dumps({'status': 'ok', 'results': results}))
+'''
+        return await self._run_remote_json_script(
+            host_alias,
+            script,
+            {"container": container},
+            timeout=60.0,
+            sudo=sudo,
+        )
+
+    async def update_docker_container(self, host_alias: str, container: str, sudo: bool = False) -> Dict[str, Any]:
+        """拉取最新镜像并沿用原容器网络、卷、端口、环境变量等配置重建容器（失败自动回滚）"""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", container or ""):
+            return {"status": "error", "message": "非法容器名称或 ID"}
+        script = r'''
+import sys, re, json, time, base64, shutil, subprocess
+
+req = json.loads(base64.b64decode(sys.argv[1]).decode('utf-8'))
+target = req.get('container') or ''
+if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', target):
+    print(json.dumps({'status': 'error', 'message': '非法容器名称或 ID'}))
+    sys.exit(0)
+
+if not shutil.which('docker'):
+    print(json.dumps({'status': 'error', 'message': '远端主机未安装 docker'}))
+    sys.exit(0)
+
+def run_cmd(args, timeout=60):
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.returncode, (r.stdout or '').strip(), (r.stderr or '').strip()
+    except subprocess.TimeoutExpired:
+        return 124, '', '命令执行超时'
+    except Exception as e:
+        return 1, '', str(e)
+
+rc, out, err = run_cmd(['docker', 'inspect', '--', target], timeout=15)
+if rc != 0 or not out:
+    print(json.dumps({'status': 'error', 'message': err or out or '读取容器配置失败'}))
+    sys.exit(0)
+
+c = json.loads(out)[0]
+old_id = c['Id']
+name = (c.get('Name') or '').lstrip('/')
+cfg = c.get('Config') or {}
+hc = c.get('HostConfig') or {}
+ns = c.get('NetworkSettings') or {}
+state = c.get('State') or {}
+was_running = bool(state.get('Running'))
+image_ref = (cfg.get('Image') or '').strip()
+old_image_id = (c.get('Image') or '').strip()
+
+if not name or not image_ref:
+    print(json.dumps({'status': 'error', 'message': '容器名称或镜像配置不完整，无法更新'}))
+    sys.exit(0)
+
+if '@sha256:' in image_ref or image_ref.startswith('sha256:') or re.fullmatch(r'[0-9a-f]{12,64}', image_ref):
+    print(json.dumps({'status': 'error', 'message': '容器使用的是固定摘要或裸镜像 ID，无法按标签自动更新'}))
+    sys.exit(0)
+
+# Inspect old image to separate user overrides from image defaults
+old_img_cfg = {}
+if old_image_id:
+    rc_im, out_im, _ = run_cmd(['docker', 'image', 'inspect', '--', old_image_id], timeout=10)
+    if rc_im == 0 and out_im:
+        try:
+            old_img_cfg = (json.loads(out_im)[0].get('Config') or {})
+        except Exception:
+            old_img_cfg = {}
+
+# 1. Pull latest image before touching the existing container
+rc_pull, out_pull, err_pull = run_cmd(['docker', 'pull', image_ref], timeout=240)
+if rc_pull != 0:
+    print(json.dumps({
+        'status': 'error',
+        'container': name,
+        'image': image_ref,
+        'updated': False,
+        'rolledBack': False,
+        'message': f'拉取最新镜像失败：{err_pull or out_pull or "未知错误"}',
+    }))
+    sys.exit(0)
+
+rc_nid, new_image_id, _ = run_cmd(['docker', 'image', 'inspect', '--format', '{{.Id}}', image_ref], timeout=10)
+if rc_nid == 0 and new_image_id and old_image_id and new_image_id == old_image_id:
+    print(json.dumps({
+        'status': 'ok',
+        'container': name,
+        'image': image_ref,
+        'updated': False,
+        'rolledBack': False,
+        'message': f'容器 {name} 已使用最新镜像 {image_ref}，无需重建',
+    }))
+    sys.exit(0)
+
+# 2. Build docker create command preserving networks, volumes, ports, env, restart policy, resources
+cmd = ['docker', 'create', '--name', name]
+
+net_mode = (hc.get('NetworkMode') or '').strip()
+networks = ns.get('Networks') or {}
+extra_networks = []
+is_special_net = net_mode in ('host', 'none') or net_mode.startswith('container:')
+
+if is_special_net:
+    cmd += ['--network', net_mode]
+else:
+    if net_mode and net_mode != 'default' and net_mode in networks:
+        primary_net = net_mode
+    elif networks:
+        primary_net = next(iter(networks.keys()))
+    else:
+        primary_net = net_mode
+
+    if primary_net and primary_net != 'default':
+        cmd += ['--network', primary_net]
+        pinfo = networks.get(primary_net) or {}
+        if primary_net != 'bridge':
+            ipam = pinfo.get('IPAMConfig') or {}
+            if ipam.get('IPv4Address'):
+                cmd += ['--ip', ipam['IPv4Address']]
+            if ipam.get('IPv6Address'):
+                cmd += ['--ip6', ipam['IPv6Address']]
+            for alias in (pinfo.get('Aliases') or []):
+                if alias and alias not in (old_id[:12], name):
+                    cmd += ['--network-alias', alias]
+
+    for nname, ninfo in networks.items():
+        if nname != primary_net:
+            extra_networks.append((nname, ninfo or {}))
+
+if not is_special_net:
+    if hc.get('PublishAllPorts'):
+        cmd.append('-P')
+    for cport, bindings in (hc.get('PortBindings') or {}).items():
+        for b in (bindings or []):
+            hip = (b.get('HostIp') or '').strip()
+            hport = (b.get('HostPort') or '').strip()
+            if hip and ':' in hip and not hip.startswith('['):
+                hip = f'[{hip}]'
+            if hip and hport:
+                cmd += ['-p', f'{hip}:{hport}:{cport}']
+            elif hport:
+                cmd += ['-p', f'{hport}:{cport}']
+            elif hip:
+                cmd += ['-p', f'{hip}::{cport}']
+            else:
+                cmd += ['-p', cport]
+
+if cfg.get('Hostname') and cfg['Hostname'] != old_id[:12] and net_mode != 'host':
+    cmd += ['--hostname', cfg['Hostname']]
+if cfg.get('Domainname') and net_mode != 'host':
+    cmd += ['--domainname', cfg['Domainname']]
+for eh in (hc.get('ExtraHosts') or []):
+    cmd += ['--add-host', eh]
+for d in (hc.get('Dns') or []):
+    cmd += ['--dns', d]
+for ds in (hc.get('DnsSearch') or []):
+    cmd += ['--dns-search', ds]
+for do in (hc.get('DnsOptions') or []):
+    cmd += ['--dns-opt', do]
+
+# Mounts (bind + named/anonymous volumes)
+for m in (c.get('Mounts') or []):
+    mtype = m.get('Type') or ''
+    dest = m.get('Destination') or ''
+    rw = m.get('RW', True)
+    if not dest:
+        continue
+    if mtype == 'bind' and m.get('Source'):
+        src = m['Source']
+        if ',' in src or ',' in dest:
+            cmd += ['-v', f'{src}:{dest}' + (':ro' if not rw else '')]
+        else:
+            parts = ['type=bind', f'source={src}', f'target={dest}']
+            if not rw:
+                parts.append('readonly')
+            prop = m.get('Propagation') or ''
+            if prop:
+                parts.append(f'bind-propagation={prop}')
+            cmd += ['--mount', ','.join(parts)]
+    elif mtype == 'volume' and m.get('Name'):
+        vname = m['Name']
+        if ',' in vname or ',' in dest:
+            cmd += ['-v', f'{vname}:{dest}' + (':ro' if not rw else '')]
+        else:
+            parts = ['type=volume', f'source={vname}', f'target={dest}']
+            if not rw:
+                parts.append('readonly')
+            cmd += ['--mount', ','.join(parts)]
+
+for dest, opts in (hc.get('Tmpfs') or {}).items():
+    cmd += ['--tmpfs', f'{dest}:{opts}' if opts else dest]
+for vf in (hc.get('VolumesFrom') or []):
+    cmd += ['--volumes-from', vf]
+
+# Restart policy
+rp = hc.get('RestartPolicy') or {}
+rp_name = (rp.get('Name') or '').strip()
+if rp_name and rp_name != 'no':
+    rp_val = f'{rp_name}:{rp["MaximumRetryCount"]}' if rp_name == 'on-failure' and rp.get('MaximumRetryCount') else rp_name
+    cmd += ['--restart', rp_val]
+
+# Resources & runtime flags
+if (hc.get('Memory') or 0) > 0:
+    cmd += ['--memory', str(hc['Memory'])]
+    if hc.get('MemorySwap') not in (None, 0):
+        cmd += ['--memory-swap', str(hc['MemorySwap'])]
+if (hc.get('NanoCpus') or 0) > 0:
+    cmd += ['--cpus', f'{hc["NanoCpus"] / 1e9:g}']
+elif (hc.get('CpuQuota') or 0) > 0:
+    cmd += ['--cpu-quota', str(hc['CpuQuota'])]
+    if (hc.get('CpuPeriod') or 0) > 0:
+        cmd += ['--cpu-period', str(hc['CpuPeriod'])]
+if hc.get('CpusetCpus'):
+    cmd += ['--cpuset-cpus', hc['CpusetCpus']]
+if (hc.get('ShmSize') or 0) > 0:
+    cmd += ['--shm-size', str(hc['ShmSize'])]
+if hc.get('Privileged'):
+    cmd.append('--privileged')
+if hc.get('ReadonlyRootfs'):
+    cmd.append('--read-only')
+if hc.get('Init'):
+    cmd.append('--init')
+if hc.get('Runtime') and hc['Runtime'] != 'runc':
+    cmd += ['--runtime', hc['Runtime']]
+for cap in (hc.get('CapAdd') or []):
+    cmd += ['--cap-add', cap]
+for cap in (hc.get('CapDrop') or []):
+    cmd += ['--cap-drop', cap]
+for so in (hc.get('SecurityOpt') or []):
+    cmd += ['--security-opt', so]
+for grp in (hc.get('GroupAdd') or []):
+    cmd += ['--group-add', grp]
+for dev in (hc.get('Devices') or []):
+    p_host = dev.get('PathOnHost')
+    p_cont = dev.get('PathInContainer')
+    perms = dev.get('CgroupPermissions') or 'rwm'
+    if p_host and p_cont:
+        cmd += ['--device', f'{p_host}:{p_cont}:{perms}']
+for sk, sv in (hc.get('Sysctls') or {}).items():
+    cmd += ['--sysctl', f'{sk}={sv}']
+for mode_key, flag in (('PidMode', '--pid'), ('IpcMode', '--ipc'), ('UtsMode', '--uts')):
+    mv = (hc.get(mode_key) or '').strip()
+    if mv and mv not in ('private', 'shareable'):
+        cmd += [flag, mv]
+
+log_cfg = hc.get('LogConfig') or {}
+if log_cfg.get('Type') and log_cfg['Type'] != 'json-file':
+    cmd += ['--log-driver', log_cfg['Type']]
+for lk, lv in (log_cfg.get('Config') or {}).items():
+    cmd += ['--log-opt', f'{lk}={lv}']
+
+if cfg.get('Tty'):
+    cmd.append('-t')
+if cfg.get('OpenStdin'):
+    cmd.append('-i')
+if cfg.get('StopSignal'):
+    cmd += ['--stop-signal', cfg['StopSignal']]
+
+# User-overridden Env, Labels, WorkingDir, User, Entrypoint, Cmd
+old_img_env = set(old_img_cfg.get('Env') or [])
+for e in (cfg.get('Env') or []):
+    if e not in old_img_env:
+        cmd += ['-e', e]
+
+old_img_labels = old_img_cfg.get('Labels') or {}
+for lk, lv in (cfg.get('Labels') or {}).items():
+    if old_img_labels.get(lk) != lv:
+        cmd += ['--label', f'{lk}={lv}']
+
+if cfg.get('WorkingDir') and cfg.get('WorkingDir') != old_img_cfg.get('WorkingDir'):
+    cmd += ['-w', cfg['WorkingDir']]
+if cfg.get('User') and cfg.get('User') != old_img_cfg.get('User'):
+    cmd += ['-u', cfg['User']]
+
+ep_extra = []
+c_ep = cfg.get('Entrypoint')
+old_ep = old_img_cfg.get('Entrypoint')
+if c_ep != old_ep and c_ep is not None:
+    if isinstance(c_ep, list) and len(c_ep) > 0:
+        cmd += ['--entrypoint', c_ep[0]]
+        ep_extra = c_ep[1:]
+    elif isinstance(c_ep, list) and len(c_ep) == 0:
+        cmd += ['--entrypoint', '']
+
+cmd.append(image_ref)
+
+c_cmd = cfg.get('Cmd')
+old_cmd = old_img_cfg.get('Cmd')
+if ep_extra:
+    cmd.extend(ep_extra)
+if c_cmd is not None and (c_cmd != old_cmd or ep_extra):
+    cmd.extend(c_cmd)
+
+# 3. Safe swap with automatic rollback
+backup_name = f'{name}-backup-{int(time.time())}'
+if was_running:
+    rc_stop, out_stop, err_stop = run_cmd(['docker', 'stop', '-t', '15', '--', old_id], timeout=45)
+    if rc_stop != 0:
+        print(json.dumps({
+            'status': 'error',
+            'container': name,
+            'image': image_ref,
+            'updated': False,
+            'rolledBack': False,
+            'message': f'停止原容器失败：{err_stop or out_stop}',
+        }))
+        sys.exit(0)
+
+rc_ren, out_ren, err_ren = run_cmd(['docker', 'rename', '--', old_id, backup_name], timeout=15)
+if rc_ren != 0:
+    if was_running:
+        run_cmd(['docker', 'start', '--', old_id], timeout=30)
+    print(json.dumps({
+        'status': 'error',
+        'container': name,
+        'image': image_ref,
+        'updated': False,
+        'rolledBack': True,
+        'message': f'备份原容器名失败，已恢复原容器：{err_ren or out_ren}',
+    }))
+    sys.exit(0)
+
+new_id = ''
+try:
+    rc_cr, out_cr, err_cr = run_cmd(cmd, timeout=30)
+    if rc_cr != 0 or not out_cr:
+        raise RuntimeError(err_cr or out_cr or '创建新容器失败')
+    new_id = out_cr.splitlines()[-1].strip()
+
+    for nname, ninfo in extra_networks:
+        ncmd = ['docker', 'network', 'connect']
+        ipam = ninfo.get('IPAMConfig') or {}
+        if ipam.get('IPv4Address'):
+            ncmd += ['--ip', ipam['IPv4Address']]
+        if ipam.get('IPv6Address'):
+            ncmd += ['--ip6', ipam['IPv6Address']]
+        for alias in (ninfo.get('Aliases') or []):
+            if alias and alias not in (old_id[:12], name):
+                ncmd += ['--alias', alias]
+        ncmd += [nname, new_id]
+        rc_nc, out_nc, err_nc = run_cmd(ncmd, timeout=15)
+        if rc_nc != 0:
+            raise RuntimeError(f'连接网络 {nname} 失败：{err_nc or out_nc}')
+
+    if was_running:
+        rc_st, out_st, err_st = run_cmd(['docker', 'start', '--', new_id], timeout=30)
+        if rc_st != 0:
+            raise RuntimeError(f'启动新容器失败：{err_st or out_st}')
+
+    # Success: remove backup container (never remove volumes)
+    run_cmd(['docker', 'rm', '--', old_id], timeout=15)
+    print(json.dumps({
+        'status': 'ok',
+        'container': name,
+        'newContainerId': new_id[:12],
+        'image': image_ref,
+        'updated': True,
+        'rolledBack': False,
+        'message': f'容器 {name} 已更新至最新镜像 {image_ref}',
+    }))
+except Exception as exc:
+    if new_id:
+        run_cmd(['docker', 'rm', '-f', '--', new_id], timeout=15)
+    run_cmd(['docker', 'rename', '--', old_id, name], timeout=15)
+    if was_running:
+        run_cmd(['docker', 'start', '--', old_id], timeout=30)
+    print(json.dumps({
+        'status': 'error',
+        'container': name,
+        'image': image_ref,
+        'updated': False,
+        'rolledBack': True,
+        'message': f'更新失败，已自动回滚至原容器：{exc}',
+    }))
+'''
+        return await self._run_remote_json_script(
+            host_alias,
+            script,
+            {"container": container},
+            timeout=300.0,
+            sudo=sudo,
+        )
+
     async def control_systemd_service(self, host_alias: str, service: str, action: str, sudo: bool = False) -> Dict[str, Any]:
         action_labels = {"start": "启动", "stop": "停止", "restart": "重启"}
         if action not in action_labels:

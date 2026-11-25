@@ -13,6 +13,8 @@ from models import (
     TerminalAuthPayload,
     DockerRestartPayload,
     DockerActionPayload,
+    DockerCheckUpdatePayload,
+    DockerUpdatePayload,
     SystemdActionPayload,
     FirewallRuleCreatePayload,
     FirewallRuleDeletePayload,
@@ -434,6 +436,20 @@ async def control_docker_container_endpoint(host_alias: str, container: str, pay
     if not find_host_by_alias(host_alias):
         raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
     return await metrics_service.control_docker_container(host_alias, container, payload.action, sudo=payload.sudo)
+
+
+@app.post("/api/v1/ssh/docker/{host_alias}/check-updates")
+async def check_docker_updates_endpoint(host_alias: str, payload: DockerCheckUpdatePayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.check_docker_updates(host_alias, container=payload.container, sudo=payload.sudo)
+
+
+@app.post("/api/v1/ssh/docker/{host_alias}/containers/{container}/update")
+async def update_docker_container_endpoint(host_alias: str, container: str, payload: DockerUpdatePayload):
+    if not find_host_by_alias(host_alias):
+        raise HTTPException(status_code=404, detail=f"未找到主机: {host_alias}")
+    return await metrics_service.update_docker_container(host_alias, container, sudo=payload.sudo)
 
 
 @app.post("/api/v1/ssh/systemd/{host_alias}/services/{service}/action")
